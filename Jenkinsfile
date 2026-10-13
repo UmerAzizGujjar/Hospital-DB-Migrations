@@ -5,20 +5,23 @@ pipeline {
         disableConcurrentBuilds()
         timestamps()
         skipDefaultCheckout(true)
-        buildDiscarder(logRotator(numToKeepStr: '30'))
+        buildDiscarder(logRotator(
+            numToKeepStr: '15',
+            daysToKeepStr: '15'
+        ))
     }
 
     parameters {
         choice(
             name: 'MODE',
             choices: ['DRY_RUN'],
-            description: 'Only DRY_RUN is enabled until database safeguards are verified.'
+            description: 'Only dry-run validation is enabled.'
         )
 
         string(
             name: 'MIGRATION_FILE',
             defaultValue: '',
-            description: 'Exact SQL file path, e.g. migrations/V20261013_001__example.sql'
+            description: 'Exact path, e.g. migrations/V20261013_001__example.sql'
         )
     }
 
@@ -33,33 +36,40 @@ pipeline {
             steps {
                 script {
                     if (params.MODE != 'DRY_RUN') {
-                        error('Database deployment is disabled in this initial version.')
+                        error('Database deployment is disabled.')
                     }
 
-                    if (!params.MIGRATION_FILE?.trim()) {
+                    def migration = params.MIGRATION_FILE?.trim()
+
+                    if (!migration) {
                         error('Enter the exact migration file path.')
                     }
 
-                    if (!(params.MIGRATION_FILE ==~
-                        /migrations\/V[0-9]{8}_[0-9]{3}__[A-Za-z0-9_-]+\.sql/)) {
-                        error('Invalid migration filename. Follow the documented naming format.')
+                    def validName = migration.matches(
+                        'migrations/V[0-9]{8}_[0-9]{3}__[A-Za-z0-9_-]+[.]sql'
+                    )
+
+                    if (!validName) {
+                        error('Invalid path or filename. Check the required naming format.')
                     }
 
-                    if (!fileExists(params.MIGRATION_FILE)) {
-                        error("Migration file not found: ${params.MIGRATION_FILE}")
+                    if (!fileExists(migration)) {
+                        error("Migration file not found: ${migration}")
                     }
 
-                    echo "Requested migration: ${params.MIGRATION_FILE}"
+                    echo "Requested migration: ${migration}"
                     echo 'Request validation passed.'
                 }
             }
         }
 
-        stage('Review Migration') {
+        stage('Review Migration File') {
             steps {
                 script {
+                    def migration = params.MIGRATION_FILE.trim()
+
                     def sql = readFile(
-                        file: params.MIGRATION_FILE,
+                        file: migration,
                         encoding: 'UTF-8'
                     )
 
@@ -67,13 +77,9 @@ pipeline {
                         error('Migration file is empty.')
                     }
 
-                    if (sql.contains('\u0000')) {
-                        error('Migration contains a null character.')
-                    }
-
-                    echo "Migration size: ${sql.length()} characters."
+                    echo "File size: ${sql.length()} characters."
+                    echo 'Basic file validation passed.'
                     echo 'Manual SQL review is still required.'
-                    echo 'No SQL was executed and no database was contacted.'
                 }
             }
         }
@@ -81,23 +87,24 @@ pipeline {
         stage('Dry-Run Report') {
             steps {
                 echo 'DRY RUN ONLY'
-                echo 'The selected migration passed basic file checks.'
-                echo 'No database connection or database changes occurred.'
+                echo 'No SQL was executed.'
+                echo 'No database connection was made.'
+                echo 'No database changes occurred.'
             }
         }
     }
 
     post {
         success {
-            echo 'Initial validation completed successfully.'
+            echo 'Migration file validation completed successfully.'
         }
 
         failure {
-            echo 'Validation failed. Review the Jenkins console output.'
+            echo 'Pipeline failed. Review the console output.'
         }
 
         always {
-            echo 'Pipeline finished. Database deployment remains disabled.'
+            echo 'Database deployment remains disabled.'
         }
     }
 }
