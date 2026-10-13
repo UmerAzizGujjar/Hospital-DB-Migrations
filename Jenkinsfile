@@ -164,13 +164,26 @@ String winOut(String cmd) {
     return bat(returnStdout: true, script: "@echo off\r\n${cmd}").trim()
 }
 
-// Sorting with closures must not run under CPS.
-@NonCPS
+// Newest commit first (ties: file name A-Z).
+// Plain insertion sort: no closures and no Groovy sort() call, so the
+// Jenkins sandbox needs no script approval and it is CPS-safe.
 List sortNewestFirst(List items) {
-    return items.sort(false) { a, b ->
-        int c = (b.ts <=> a.ts)
-        c != 0 ? c : (a.file <=> b.file)
+    def sorted = []
+    for (def item : items) {
+        int pos = sorted.size()
+        while (pos > 0 && isBefore(item, sorted[pos - 1])) {
+            pos--
+        }
+        sorted.add(pos, item)
     }
+    return sorted
+}
+
+boolean isBefore(def a, def b) {
+    if (a.ts != b.ts) {
+        return a.ts > b.ts
+    }
+    return a.file.compareTo(b.file) < 0
 }
 
 String plural(long n, String unit) {
