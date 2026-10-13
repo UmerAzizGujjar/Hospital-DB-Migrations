@@ -1,5 +1,0 @@
-/*
-    Pipeline smoke test only.
-    This file intentionally contains no executable SQL.
-    Do not use it to modify any hospital database.
-*/
