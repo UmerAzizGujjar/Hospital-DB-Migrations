@@ -79,17 +79,28 @@ pipeline {
                         labelToFile[label] = it2.file
                     }
 
-                    // 4. Ask the user
+                    // 4. Show the full list in the console, then ask the user
+                    String listing = ''
+                    int n = 1
+                    for (String label : labels) {
+                        listing += "  ${n}. ${label}\n"
+                        n++
+                    }
+                    echo "Migrations found: ${labels.size()} (newest commit first)\n${listing}"
+
                     def selectedLabel
                     timeout(time: 10, unit: 'MINUTES') {
                         selectedLabel = input(
-                            message: 'Select a migration to validate (newest first)',
-                            ok: 'Validate migration',
+                            id: 'SelectMigration',
+                            message: 'Hospital DB Migrations - choose a migration to validate',
+                            ok: 'Validate (dry run)',
                             parameters: [
                                 choice(
-                                    name: 'MIGRATION_FILE',
+                                    name: 'Migration',
                                     choices: labels,
-                                    description: 'Time shown is since the latest Git commit of each file.'
+                                    description: "DRY RUN ONLY: no SQL is executed and no database is touched.\n" +
+                                                 "${labels.size()} migration(s) found, newest commit first. " +
+                                                 "The time shown is since each file's latest Git commit."
                                 )
                             ]
                         )
