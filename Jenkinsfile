@@ -1,3 +1,4 @@
+
 pipeline {
     agent any
 
@@ -11,20 +12,6 @@ pipeline {
         ))
     }
 
-    parameters {
-        choice(
-            name: 'MODE',
-            choices: ['DRY_RUN'],
-            description: 'Only dry-run validation is enabled.'
-        )
-
-        string(
-            name: 'MIGRATION_FILE',
-            defaultValue: '',
-            description: 'Exact path, e.g. migrations/V20261013_001__example.sql'
-        )
-    }
-
     stages {
         stage('Checkout Repository') {
             steps {
@@ -32,33 +19,113 @@ pipeline {
             }
         }
 
+        stage('Discover Migrations') {
+            steps {
+                script {
+                    def output = bat(
+                        returnStdout: true,
+                        script: '@echo off\r\ngit ls-files migrations'
+                    ).trim()
+
+                    def files = output
+                        .split(/\r?\n/)
+                        .collect { it.trim() }
+                        .findAll {
+                            it &&
+                            it.matches(
+                                'migrations/(.*/)?V[0-9]{8}_[0-9]{3}__[A-Za-z0-9_-]+[.]sql'
+                            )
+                        }
+
+                    if (files.isEmpty()) {
+                        error('No valid migration files found in migrations/.')
+                    }
+
+                    def migrations = []
+
+                    for (file in files) {
+                        def timestampText = bat(
+                            returnStdout: true,
+                            script: "@echo off\r\ngit log -1 --format=%%ct -- \"${file}\""
+                        ).trim()
+
+                        if (!timestampText.isLong()) {
+                            error("Could not determine last commit time for ${file}")
+                        }
+
+                        migrations.add([
+                            file: file,
+                            timestamp: timestampText.toLong()
+                        ])
+                    }
+
+                    migrations.sort { a, b ->
+                        b.timestamp <=> a.timestamp
+                    }
+
+                    def nowSeconds =
+                        (System.currentTimeMillis() / 1000L) as long
+
+                    def choices = migrations.collect { m ->
+                        def age = Math.max(
+                            0L, nowSeconds - m.timestamp
+                        )
+
+                        def ageText
+
+                        if (age < 60) {
+                            ageText = "${age}s ago"
+                        } else if (age < 3600) {
+                            ageText = "${(age / 60) as long}m ago"
+                        } else if (age < 86400) {
+                            ageText = "${(age / 3600) as long}h ago"
+                        } else {
+                            ageText = "${(age / 86400) as long}d ago"
+                        }
+
+                        "${m.file} || ${ageText}"
+                    }
+
+                    echo "Found ${choices.size()} migration file(s)."
+
+                    env.MIGRATION_CHOICES = choices.join('\n')
+                }
+            }
+        }
+
+        stage('Select Migration') {
+            steps {
+                script {
+                    def selected = input(
+                        message: 'Choose a migration to validate',
+                        ok: 'Validate selected migration',
+                        parameters: [
+                            choice(
+                                name: 'MIGRATION_CHOICE',
+                                choices: env.MIGRATION_CHOICES,
+                                description: 'Newest migration commits appear first.'
+                            )
+                        ]
+                    )
+
+                    env.SELECTED_MIGRATION =
+                        selected.split(/\s+\|\|\s+/, 2)[0]
+
+                    echo "Selected migration: ${env.SELECTED_MIGRATION}"
+                }
+            }
+        }
+
         stage('Validate Request') {
             steps {
                 script {
-                    if (params.MODE != 'DRY_RUN') {
-                        error('Database deployment is disabled.')
+                    def migration = env.SELECTED_MIGRATION
+
+                    if (!migration || !fileExists(migration)) {
+                        error('Selected migration file was not found.')
                     }
 
-                    def migration = params.MIGRATION_FILE?.trim()
-
-                    if (!migration) {
-                        error('Enter the exact migration file path.')
-                    }
-
-                    def validName = migration.matches(
-                        'migrations/V[0-9]{8}_[0-9]{3}__[A-Za-z0-9_-]+[.]sql'
-                    )
-
-                    if (!validName) {
-                        error('Invalid path or filename. Check the required naming format.')
-                    }
-
-                    if (!fileExists(migration)) {
-                        error("Migration file not found: ${migration}")
-                    }
-
-                    echo "Requested migration: ${migration}"
-                    echo 'Request validation passed.'
+                    echo 'Migration path validation passed.'
                 }
             }
         }
@@ -66,10 +133,8 @@ pipeline {
         stage('Review Migration File') {
             steps {
                 script {
-                    def migration = params.MIGRATION_FILE.trim()
-
                     def sql = readFile(
-                        file: migration,
+                        file: env.SELECTED_MIGRATION,
                         encoding: 'UTF-8'
                     )
 
@@ -78,7 +143,6 @@ pipeline {
                     }
 
                     echo "File size: ${sql.length()} characters."
-                    echo 'Basic file validation passed.'
                     echo 'Manual SQL review is still required.'
                 }
             }
