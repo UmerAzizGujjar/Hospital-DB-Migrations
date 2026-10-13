@@ -1,0 +1,4 @@
+/*
+   Pipeline smoke test only.
+   No executable SQL.
+*/
