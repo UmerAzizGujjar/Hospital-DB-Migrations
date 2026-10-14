@@ -216,6 +216,7 @@ pipeline {
                                         $builder["Password"] = $env:DB_PASS
                                         $builder["Connect Timeout"] = 15
                                         $builder["TrustServerCertificate"] = $true
+                                        $builder["Application Name"] = "Jenkins_Pipeline"
 
                                         $conn = New-Object System.Data.SqlClient.SqlConnection($builder.ConnectionString)
                                         $conn.Open()
