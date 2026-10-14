@@ -39,7 +39,7 @@ pipeline {
                         error "This pipeline requires a Windows agent."
                     }
 
-                    selectedHospitals.clear()
+                    selectedHospitals = []
                     if (params.CHK_PAKRED_UAT) selectedHospitals << 'Pakred_UAT'
                     if (params.CHK_ASIRAAT)    selectedHospitals << 'ASIRAAT'
                     if (params.CHK_CPTH)       selectedHospitals << 'CPTH'
