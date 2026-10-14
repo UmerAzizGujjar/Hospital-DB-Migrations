@@ -159,7 +159,7 @@ pipeline {
 
                     def hospitalConfigs = [
                         'Pakred_UAT': [ 
-                           server: '103.48.0.82,1433'
+                           server: '103.48.0.82,1433',
                             dbName: 'pakred_uat', 
                             credId: 'pakred-uat-creds' 
                         ],
