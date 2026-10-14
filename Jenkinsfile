@@ -115,17 +115,25 @@ pipeline {
                     
                     def fileObjects = []
                     for (f in rawFiles) {
-                        def cTimeStr = bat(script: "@echo off && git log -1 --format=%%ct -- \"${env.MIGRATION_DIR}\\${f}\"", returnStdout: true).trim()
-                        def relAge = bat(script: "@echo off && git log -1 --format=%%cr -- \"${env.MIGRATION_DIR}\\${f}\"", returnStdout: true).trim()
+                        def cTimeOut = bat(script: "@echo off && git log -1 --format=%ct -- \"${env.MIGRATION_DIR}\\${f}\"", returnStdout: true).trim()
+                        def relAgeOut = bat(script: "@echo off && git log -1 --format=%cr -- \"${env.MIGRATION_DIR}\\${f}\"", returnStdout: true).trim()
+                        
+                        // Extract ONLY the last line so any echoed batch output doesn't break the dropdown
+                        def cTimeLines = cTimeOut ? cTimeOut.readLines() : []
+                        def relAgeLines = relAgeOut ? relAgeOut.readLines() : []
+                        
+                        def cTimeStr = cTimeLines ? cTimeLines.last().trim() : ""
+                        def relAge = relAgeLines ? relAgeLines.last().trim() : ""
                         
                         long cTime = 0
                         if (cTimeStr && cTimeStr.isNumber()) {
                             cTime = cTimeStr.toLong()
                         } else {
-                            relAge = "Unknown age (Git lookup failed)"
+                            relAge = "Unknown age"
                         }
                         
-                        def choiceStr = "${f} (${relAge})"
+                        // Ensure single-line clean label for Jenkins choice dropdown
+                        def choiceStr = "${f} (${relAge})".replaceAll(/[\r\n]+/, ' ')
                         fileObjects << [name: f, timestamp: cTime, ageDisplay: relAge, choiceLabel: choiceStr]
                     }
                     
@@ -142,11 +150,11 @@ pipeline {
                     
                     def choices = fileObjects.collect { it.choiceLabel }
 
-                    // 4. Interactive prompt
+                    // 4. Interactive prompt (Explicit ChoiceParameterDefinition for Pipeline Stage View UI)
                     env.SELECTED_CHOICE = input(
                         message: "Select a migration (${params.EXECUTION_MODE}):",
                         parameters: [
-                            choice(name: 'MIGRATION_FILE', choices: choices.join('\n'), description: 'Select the file and view its commit age')
+                            [$class: 'ChoiceParameterDefinition', name: 'MIGRATION_FILE', choices: choices.join('\n'), description: 'Select the file and view its commit age']
                         ]
                     )
                     
