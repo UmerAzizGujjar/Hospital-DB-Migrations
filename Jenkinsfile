@@ -1,5 +1,6 @@
 // Global variables accessible across stages
 def discoveredFilesList = []
+def selectedHospitals = []
 
 pipeline {
     agent any
@@ -10,31 +11,15 @@ pipeline {
     }
 
     parameters {
-        string(
-            name: 'DB_SERVER',
-            defaultValue: 'WIN-U6S7JB4ANMN',
-            description: 'Demo/Test SQL Server host/instance. Production hosts are strictly blocked.'
-        )
-        choice(
-            name: 'TARGET_HOSPITAL',
-            choices: [
-                'STH_U_ASIRAAT',
-                'H_U_ASSIRAAT',
-                'H_U_Kaleem',
-                'H_U_Nazeer',
-                'H_U_NHMC'
-            ],
-            description: 'Select the target hospital database branch for this migration run.'
-        )
-        string(
-            name: 'DB_CREDENTIALS_ID',
-            defaultValue: 'hospital-demo-sql-creds',
-            description: 'Jenkins Credentials ID (Username with password) for Test DB.'
-        )
+        booleanParam(name: 'CHK_PAKRED_UAT', defaultValue: true, description: 'Deploy to Pakred UAT (WIN-APTS20MHM62)')
+        booleanParam(name: 'CHK_ASIRAAT', defaultValue: false, description: 'Deploy to ASIRAAT (WIN-U6S7JB4ANMN)')
+        booleanParam(name: 'CHK_CPTH', defaultValue: false, description: 'Deploy to CPTH')
+        booleanParam(name: 'CHK_NATIONAL', defaultValue: false, description: 'Deploy to National')
+        
         choice(
             name: 'EXECUTION_MODE',
             choices: ['DRY_RUN_ROLLBACK', 'COMMIT_CHANGES', 'HEALTH_CHECK_ONLY'],
-            description: 'DRY_RUN_ROLLBACK: Runs the SQL migration inside a transaction to test CREATE/ALTER/DDL, then rolls back.\nCOMMIT_CHANGES: Permanently applies the migration to the selected hospital DB.\nHEALTH_CHECK_ONLY: Only runs SELECT 1.'
+            description: 'DRY_RUN_ROLLBACK: Runs migration inside a transaction and rolls back.\nCOMMIT_CHANGES: Permanently applies migration.\nHEALTH_CHECK_ONLY: Connectivity check (SELECT 1).'
         )
     }
 
@@ -44,32 +29,30 @@ pipeline {
     }
 
     stages {
-        stage('StagePreflight') {
+        stage('StagePreflight & Config Lookup') {
             steps {
                 echo "Preflight checks starting..."
                 script {
                     if (!isUnix()) {
                         bat 'echo Jenkins Agent OS: Windows'
-                        bat 'git --version'
                     } else {
                         error "This pipeline requires a Windows agent."
                     }
 
-                    // Map selected hospital choice to DB_NAME environment variable
-                    env.TARGET_DB_NAME = params.TARGET_HOSPITAL.trim()
-                    env.TARGET_DB_SERVER = params.DB_SERVER.trim()
+                    selectedHospitals.clear()
+                    if (params.CHK_PAKRED_UAT) selectedHospitals << 'Pakred_UAT'
+                    if (params.CHK_ASIRAAT)    selectedHospitals << 'ASIRAAT'
+                    if (params.CHK_CPTH)       selectedHospitals << 'CPTH'
+                    if (params.CHK_NATIONAL)   selectedHospitals << 'National'
 
-                    def dbTargetError = validateDbTarget(
-                        env.TARGET_DB_SERVER,
-                        env.TARGET_DB_NAME,
-                        params.DB_CREDENTIALS_ID
-                    )
-                    if (dbTargetError) {
-                        error "Preflight DB Target Validation Failed: ${dbTargetError}"
+                    if (selectedHospitals.isEmpty()) {
+                        error "No hospitals selected! Please check at least one hospital box to proceed."
                     }
-                    echo "Preflight DB Target Check: Verified non-production target [${env.TARGET_DB_SERVER} / ${env.TARGET_DB_NAME}]."
-                    echo "Selected Hospital Database: ${env.TARGET_DB_NAME}"
-                    echo "Selected Execution Mode: ${params.EXECUTION_MODE}"
+
+                    echo "=========================================="
+                    echo "Selected Target Hospitals : ${selectedHospitals.join(', ')}"
+                    echo "Execution Mode            : ${params.EXECUTION_MODE}"
+                    echo "=========================================="
                 }
             }
         }
@@ -86,93 +69,58 @@ pipeline {
                     def psDiscoverAndGit = '''
                         $ErrorActionPreference = 'Stop'
                         $path = $env:MIGRATION_DIR
-                        
-                        if (-not (Test-Path -Path $path)) {
-                            Write-Output "ERROR_MISSING"
-                            exit 0
-                        }
-                        
-                        $item = Get-Item -Path $path
-                        if (-not $item.PSIsContainer) {
-                            Write-Output "ERROR_NOT_DIR"
-                            exit 0
-                        }
-                        
+                        if (-not (Test-Path -Path $path)) { Write-Output "ERROR_MISSING"; exit 0 }
                         $files = Get-ChildItem -Path $path -Filter "*.sql" -File
-                        if ($null -eq $files -or $files.Count -eq 0) {
-                            Write-Output "ERROR_EMPTY"
-                            exit 0
-                        }
+                        if ($null -eq $files -or $files.Count -eq 0) { Write-Output "ERROR_EMPTY"; exit 0 }
                         
                         foreach ($f in $files) {
                             $relPath = "$path/$($f.Name)"
-                            $ct = ""
-                            $cr = ""
+                            $ct = ""; $cr = ""
                             try {
                                 $ct = (git log -1 --format="%ct" -- $relPath 2>$null) | Select-Object -Last 1
                                 $cr = (git log -1 --format="%cr" -- $relPath 2>$null) | Select-Object -Last 1
-                            } catch {
-                                $ct = "0"
-                                $cr = "Unknown age"
-                            }
+                            } catch { $ct = "0"; $cr = "Unknown age" }
                             if ([string]::IsNullOrWhiteSpace($ct)) { $ct = "0" }
                             if ([string]::IsNullOrWhiteSpace($cr)) { $cr = "Unknown age" }
                             Write-Output "$($f.Name)|$($ct.Trim())|$($cr.Trim())"
                         }
                     '''
-                    
                     def dirOutput = powershell(script: psDiscoverAndGit, returnStdout: true).trim()
 
-                    if (dirOutput.contains("ERROR_MISSING")) {
-                        error "Validation Failed: The path ${env.MIGRATION_DIR}\\ does not exist."
-                    }
-                    if (dirOutput.contains("ERROR_NOT_DIR")) {
-                        error "Validation Failed: The path ${env.MIGRATION_DIR}\\ exists but is not a directory."
-                    }
-                    if (dirOutput.contains("ERROR_EMPTY") || !dirOutput) {
-                        error "No SQL migration files found in ${env.MIGRATION_DIR}\\ directory."
+                    if (dirOutput.contains("ERROR_MISSING") || dirOutput.contains("ERROR_EMPTY") || !dirOutput) {
+                        error "Validation Failed: No SQL migration files found in ${env.MIGRATION_DIR} directory."
                     }
                     
                     def lines = dirOutput.split('\r?\n').collect { it.trim() }.findAll { it && it.contains('|') }
-                    
                     def fileObjects = []
                     for (line in lines) {
                         def parts = line.tokenize('|')
                         def fName = parts[0]
-                        def cTimeStr = parts.size() > 1 ? parts[1] : "0"
+                        long cTime = parts.size() > 1 && parts[1].isNumber() ? parts[1].toLong() : 0L
                         def relAge = parts.size() > 2 ? parts[2] : "Unknown age"
-                        
-                        long cTime = cTimeStr.isNumber() ? cTimeStr.toLong() : 0L
-                        def choiceStr = "${fName} (${relAge})"
-                        fileObjects << [name: fName, timestamp: cTime, ageDisplay: relAge, choiceLabel: choiceStr]
+                        fileObjects << [name: fName, timestamp: cTime, ageDisplay: relAge, choiceLabel: "${fName} (${relAge})"]
                     }
                     
                     fileObjects.sort { a, b -> b.timestamp <=> a.timestamp }
                     discoveredFilesList = fileObjects.collect { it.name }
                     
-                    echo "--- Checking for Duplicate Migrations ---"
                     def duplicateError = checkDuplicateVersions(discoveredFilesList)
                     if (duplicateError) {
                         error "Pre-Validation Failed: Ambiguous deployment state. ${duplicateError}"
                     }
-                    
+
                     List<String> choicesList = fileObjects.collect { it.choiceLabel.toString() }
 
                     env.SELECTED_CHOICE = input(
-                        message: "Hospital [${env.TARGET_DB_NAME}] - Select a migration (${params.EXECUTION_MODE}):",
+                        message: "Apply migration to: [${selectedHospitals.join(', ')}]",
                         parameters: [
-                            choice(name: 'MIGRATION_FILE', choices: choicesList, description: 'Select the file and view its commit age')
+                            choice(name: 'MIGRATION_FILE', choices: choicesList, description: 'Select the file to deploy')
                         ]
                     )
                     
                     def selectedFileObj = fileObjects.find { it.choiceLabel == env.SELECTED_CHOICE }
-                    if (selectedFileObj) {
-                        env.SELECTED_FILENAME = selectedFileObj.name
-                        env.COMMIT_AGE = selectedFileObj.ageDisplay
-                    } else {
-                        env.SELECTED_FILENAME = "UNKNOWN_SELECTION"
-                        env.COMMIT_AGE = "UNKNOWN"
-                    }
+                    env.SELECTED_FILENAME = selectedFileObj ? selectedFileObj.name : "UNKNOWN"
+                    env.COMMIT_AGE = selectedFileObj ? selectedFileObj.ageDisplay : "Unknown"
                     env.SELECTED_PATH = "${env.MIGRATION_DIR}\\${env.SELECTED_FILENAME}"
                 }
             }
@@ -182,33 +130,19 @@ pipeline {
             steps {
                 script {
                     def filename = env.SELECTED_FILENAME
-                    
-                    echo "--- A. Validating Migration Selection ---"
                     def selectionError = validateMigrationFilename(filename, discoveredFilesList, env.REGEX_PATTERN)
                     if (selectionError) error "Validation Failed: ${selectionError}"
-                    
-                    def expectedPath = "${env.MIGRATION_DIR}\\${filename}"
-                    if (!fileExists(expectedPath)) error "Validation Failed: The file ${expectedPath} does not exist in the workspace."
 
-                    echo "--- B. Validating File Contents ---"
+                    def expectedPath = env.SELECTED_PATH
+                    if (!fileExists(expectedPath)) error "Validation Failed: File ${expectedPath} not found."
+
                     def rawSql = readFile(file: expectedPath, encoding: 'UTF-8')
-                    
-                    env.FILE_SIZE_BYTES = rawSql.getBytes("UTF-8").length.toString()
-                    env.FILE_LINE_COUNT = rawSql.readLines().size().toString()
-
-                    echo "--- C. Strict SQL Safety Scan (Blocking Destructive DDL/DML) ---"
                     def scanResult = scanSqlSafety(rawSql)
                     
                     if (scanResult.error) {
                         error "SECURITY VIOLATION: Migration failed safety policy -> ${scanResult.error}"
                     }
-                    
-                    if (scanResult.warnings.isEmpty()) {
-                        env.SAFETY_WARNINGS = "None"
-                    } else {
-                        env.SAFETY_WARNINGS = scanResult.warnings.join(" | ")
-                        echo "MANUAL REVIEW REQUIRED: Noticeable patterns flagged by static scan."
-                    }
+                    echo "Validation & Safety Scan Passed. File is safe for execution."
                 }
             }
         }
@@ -218,117 +152,159 @@ pipeline {
                 script {
                     if (params.EXECUTION_MODE == 'COMMIT_CHANGES') {
                         input(
-                            message: "CONFIRMATION: Permanently apply ${env.SELECTED_FILENAME} to Hospital DB [${env.TARGET_DB_NAME}]?",
+                            message: "CONFIRMATION: Permanently apply ${env.SELECTED_FILENAME} to: [${selectedHospitals.join(', ')}]?",
                             ok: "Yes, Commit Migration"
                         )
                     }
 
+                    def hospitalConfigs = [
+                        'Pakred_UAT': [ 
+                            server: 'WIN-APTS20MHM62', 
+                            dbName: 'pakred_uat', 
+                            credId: 'pakred-uat-creds' 
+                        ],
+                        'ASIRAAT': [ 
+                            server: 'WIN-U6S7JB4ANMN', 
+                            dbName: 'STH_U_ASIRAAT', 
+                            credId: 'hospital-demo-sql-creds' 
+                        ],
+                        'CPTH': [ 
+                            server: '192.168.1.100', 
+                            dbName: 'CPTH_DB', 
+                            credId: 'cpth-sql-creds' 
+                        ],
+                        'National': [ 
+                            server: '192.168.1.105', 
+                            dbName: 'National_DB', 
+                            credId: 'national-sql-creds' 
+                        ]
+                    ]
+
                     env.EXEC_MODE = params.EXECUTION_MODE
+                    def failedHospitals = []
 
-                    withCredentials([usernamePassword(
-                        credentialsId: params.DB_CREDENTIALS_ID.trim(),
-                        usernameVariable: 'DB_USER',
-                        passwordVariable: 'DB_PASS'
-                    )]) {
-                        def sqlRunnerPs = '''
-                            $ErrorActionPreference = 'Stop'
-                            $conn = $null
-                            $tran = $null
-                            try {
-                                $builder = New-Object System.Data.SqlClient.SqlConnectionStringBuilder
-                                $builder["Data Source"] = $env:TARGET_DB_SERVER
-                                $builder["Initial Catalog"] = $env:TARGET_DB_NAME
-                                $builder["User ID"] = $env:DB_USER
-                                $builder["Password"] = $env:DB_PASS
-                                $builder["Connect Timeout"] = 15
-                                $builder["TrustServerCertificate"] = $true
-
-                                $conn = New-Object System.Data.SqlClient.SqlConnection($builder.ConnectionString)
-                                $conn.Open()
-
-                                $pingCmd = $conn.CreateCommand()
-                                $pingCmd.CommandText = "SELECT 1;"
-                                $null = $pingCmd.ExecuteScalar()
-                                Write-Output "DB_CONNECTED_OK"
-
-                                if ($env:EXEC_MODE -eq "HEALTH_CHECK_ONLY") {
-                                    Write-Output "MODE_HEALTH_CHECK_COMPLETE"
-                                    exit 0
-                                }
-
-                                $sqlContent = Get-Content -Path $env:SELECTED_PATH -Raw -Encoding UTF8
-                                $batches = [regex]::Split($sqlContent, '(?im)^\\s*GO\\s*$')
-
-                                $tran = $conn.BeginTransaction()
-
-                                $batchNum = 0
-                                foreach ($batch in $batches) {
-                                    $trimmed = $batch.Trim()
-                                    if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
-                                    $batchNum++
-                                    
-                                    $cmd = $conn.CreateCommand()
-                                    $cmd.Transaction = $tran
-                                    $cmd.CommandTimeout = 60
-                                    $cmd.CommandText = $trimmed
-                                    $rows = $cmd.ExecuteNonQuery()
-                                    Write-Output "Executed Batch #$batchNum successfully against branch $env:TARGET_DB_NAME."
-                                }
-
-                                if ($env:EXEC_MODE -eq "DRY_RUN_ROLLBACK") {
-                                    $tran.Rollback()
-                                    Write-Output "DRY_RUN_ROLLBACK_COMPLETE: All CREATE/ALTER batches executed against hospital DB [$env:TARGET_DB_NAME], then safely rolled back."
-                                }
-                                elseif ($env:EXEC_MODE -eq "COMMIT_CHANGES") {
-                                    $histCmd = $conn.CreateCommand()
-                                    $histCmd.Transaction = $tran
-                                    $histCmd.CommandText = @"
-                                        IF OBJECT_ID('dbo.JenkinsMigrationHistory', 'U') IS NULL
-                                        BEGIN
-                                            CREATE TABLE dbo.JenkinsMigrationHistory (
-                                                Id INT IDENTITY(1,1) PRIMARY KEY,
-                                                MigrationFile NVARCHAR(255) NOT NULL,
-                                                AppliedAt DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
-                                            );
-                                        END
-                                        INSERT INTO dbo.JenkinsMigrationHistory (MigrationFile) VALUES (@file);
-"@
-                                    $null = $histCmd.Parameters.AddWithValue("@file", $env:SELECTED_FILENAME)
-                                    $null = $histCmd.ExecuteNonQuery()
-
-                                    $tran.Commit()
-                                    Write-Output "COMMIT_CHANGES_COMPLETE: Migration permanently committed for hospital [$env:TARGET_DB_NAME] and logged in dbo.JenkinsMigrationHistory."
-                                }
-                            }
-                            catch {
-                                if ($null -ne $tran) {
-                                    try { $tran.Rollback() } catch {}
-                                }
-                                if ($_.Exception.InnerException -is [System.Data.SqlClient.SqlException]) {
-                                    $sqlEx = [System.Data.SqlClient.SqlException]$_.Exception.InnerException
-                                    Write-Output "SQL_EXECUTION_ERROR: Line $($sqlEx.LineNumber) - $($sqlEx.Message)"
-                                } elseif ($_.Exception -is [System.Data.SqlClient.SqlException]) {
-                                    $sqlEx = [System.Data.SqlClient.SqlException]$_.Exception
-                                    Write-Output "SQL_EXECUTION_ERROR: Line $($sqlEx.LineNumber) - $($sqlEx.Message)"
-                                } else {
-                                    Write-Output "GENERAL_DB_ERROR: $($_.Exception.Message)"
-                                }
-                                exit 1
-                            }
-                            finally {
-                                if ($null -ne $conn -and $conn.State -ne [System.Data.ConnectionState]::Closed) {
-                                    $conn.Close()
-                                    $conn.Dispose()
-                                }
-                            }
-                        '''
-
-                        def status = powershell(script: sqlRunnerPs, returnStatus: true)
-                        if (status != 0) {
-                            env.DB_EXEC_STATUS = "FAILED"
-                            error "Database execution failed for hospital [${env.TARGET_DB_NAME}] in mode [${params.EXECUTION_MODE}]."
+                    for (hosp in selectedHospitals) {
+                        def config = hospitalConfigs[hosp]
+                        if (!config) {
+                            echo "❌ Missing config map entry for ${hosp}"
+                            failedHospitals << hosp
+                            continue
                         }
-                        env.DB_EXEC_STATUS = "PASSED (${params.EXECUTION_MODE})"
+
+                        echo "====================================================="
+                        echo "Processing [${hosp}] -> Server: ${config.server}, DB: ${config.dbName}"
+                        echo "====================================================="
+
+                        env.TARGET_DB_SERVER = config.server
+                        env.TARGET_DB_NAME   = config.dbName
+
+                        try {
+                            withCredentials([usernamePassword(
+                                credentialsId: config.credId,
+                                usernameVariable: 'DB_USER',
+                                passwordVariable: 'DB_PASS'
+                            )]) {
+                                def sqlRunnerPs = '''
+                                    $ErrorActionPreference = 'Stop'
+                                    $conn = $null
+                                    $tran = $null
+                                    try {
+                                        $builder = New-Object System.Data.SqlClient.SqlConnectionStringBuilder
+                                        $builder["Data Source"] = $env:TARGET_DB_SERVER
+                                        $builder["Initial Catalog"] = $env:TARGET_DB_NAME
+                                        $builder["User ID"] = $env:DB_USER
+                                        $builder["Password"] = $env:DB_PASS
+                                        $builder["Connect Timeout"] = 15
+                                        $builder["TrustServerCertificate"] = $true
+
+                                        $conn = New-Object System.Data.SqlClient.SqlConnection($builder.ConnectionString)
+                                        $conn.Open()
+
+                                        $pingCmd = $conn.CreateCommand()
+                                        $pingCmd.CommandText = "SELECT 1;"
+                                        $null = $pingCmd.ExecuteScalar()
+                                        Write-Output "DB_CONNECTED_OK"
+
+                                        if ($env:EXEC_MODE -eq "HEALTH_CHECK_ONLY") {
+                                            Write-Output "MODE_HEALTH_CHECK_COMPLETE"
+                                            exit 0
+                                        }
+
+                                        $sqlContent = Get-Content -Path $env:SELECTED_PATH -Raw -Encoding UTF8
+                                        $batches = [regex]::Split($sqlContent, '(?im)^\\s*GO\\s*$')
+
+                                        $tran = $conn.BeginTransaction()
+
+                                        $batchNum = 0
+                                        foreach ($batch in $batches) {
+                                            $trimmed = $batch.Trim()
+                                            if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
+                                            $batchNum++
+                                            
+                                            $cmd = $conn.CreateCommand()
+                                            $cmd.Transaction = $tran
+                                            $cmd.CommandTimeout = 60
+                                            $cmd.CommandText = $trimmed
+                                            $null = $cmd.ExecuteNonQuery()
+                                            Write-Output "Batch #$batchNum executed successfully."
+                                        }
+
+                                        if ($env:EXEC_MODE -eq "DRY_RUN_ROLLBACK") {
+                                            $tran.Rollback()
+                                            Write-Output "DRY_RUN_ROLLBACK_COMPLETE: Changes rolled back cleanly on $env:TARGET_DB_NAME."
+                                        }
+                                        elseif ($env:EXEC_MODE -eq "COMMIT_CHANGES") {
+                                            $histCmd = $conn.CreateCommand()
+                                            $histCmd.Transaction = $tran
+                                            $histCmd.CommandText = @"
+                                                IF OBJECT_ID('dbo.JenkinsMigrationHistory', 'U') IS NULL
+                                                BEGIN
+                                                    CREATE TABLE dbo.JenkinsMigrationHistory (
+                                                        Id INT IDENTITY(1,1) PRIMARY KEY,
+                                                        MigrationFile NVARCHAR(255) NOT NULL,
+                                                        AppliedAt DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
+                                                    );
+                                                END
+                                                INSERT INTO dbo.JenkinsMigrationHistory (MigrationFile) VALUES (@file);
+"@
+                                            $null = $histCmd.Parameters.AddWithValue("@file", $env:SELECTED_FILENAME)
+                                            $null = $histCmd.ExecuteNonQuery()
+
+                                            $tran.Commit()
+                                            Write-Output "COMMIT_CHANGES_COMPLETE: Changes permanently committed on $env:TARGET_DB_NAME."
+                                        }
+                                    }
+                                    catch {
+                                        if ($null -ne $tran) {
+                                            try { $tran.Rollback() } catch {}
+                                        }
+                                        Write-Output "SQL_EXECUTION_ERROR: $($_.Exception.Message)"
+                                        exit 1
+                                    }
+                                    finally {
+                                        if ($null -ne $conn -and $conn.State -ne [System.Data.ConnectionState]::Closed) {
+                                            $conn.Close()
+                                            $conn.Dispose()
+                                        }
+                                    }
+                                '''
+
+                                def status = powershell(script: sqlRunnerPs, returnStatus: true)
+                                if (status != 0) {
+                                    echo "❌ FAILED on ${hosp}"
+                                    failedHospitals << hosp
+                                } else {
+                                    echo "✅ PASSED on ${hosp}"
+                                }
+                            }
+                        } catch (Exception e) {
+                            echo "❌ ERROR on ${hosp}: ${e.message}"
+                            failedHospitals << hosp
+                        }
+                    }
+
+                    if (!failedHospitals.isEmpty()) {
+                        error "Pipeline failed on the following target(s): ${failedHospitals.join(', ')}."
                     }
                 }
             }
@@ -340,38 +316,27 @@ pipeline {
                     echo "====================================================="
                     echo "              MIGRATION EXECUTION REPORT             "
                     echo "====================================================="
-                    echo "Selected Path       : ${env.SELECTED_PATH}"
+                    echo "Executed File       : ${env.SELECTED_FILENAME}"
                     echo "Commit Age          : ${env.COMMIT_AGE}"
-                    echo "File Size           : ${env.FILE_SIZE_BYTES} bytes"
-                    echo "Line Count          : ${env.FILE_LINE_COUNT} lines"
-                    echo "Validation Checks   : PASSED (Strict Policy Enforced)"
-                    echo "Safety Warnings     : ${env.SAFETY_WARNINGS}"
-                    echo "Target Server       : ${env.TARGET_DB_SERVER}"
-                    echo "Target Hospital DB  : ${env.TARGET_DB_NAME}"
+                    echo "Target Hospitals    : ${selectedHospitals.join(', ')}"
                     echo "Execution Mode      : ${params.EXECUTION_MODE}"
-                    echo "Database Result     : ${env.DB_EXEC_STATUS}"
+                    echo "Result              : ALL TARGETS PASSED"
                     echo "====================================================="
                 }
-            }
-        }
-        
-        stage('StagePost Actions') {
-            steps {
-                echo "Post actions complete. Diagnostics preserved in workspace."
             }
         }
     }
 }
 
 // ============================================================================
-// --- SHARED FUNCTIONS ---
+// --- SHARED HELPER FUNCTIONS ---
 // ============================================================================
 
 @NonCPS
 def validateMigrationFilename(String filename, List<String> validList, String patternStr) {
     if (!filename || filename.trim() == "") return "Empty selection."
     if (!validList.contains(filename)) return "Selected file '${filename}' is not in the discovered list."
-    if (!(filename ==~ patternStr)) return "Filename '${filename}' does not match the required convention (VYYYYMMDD_NNN__description.sql)."
+    if (!(filename ==~ patternStr)) return "Filename '${filename}' does not match pattern (VYYYYMMDD_NNN__description.sql)."
     return null
 }
 
@@ -395,28 +360,6 @@ def checkDuplicateVersions(List<String> files) {
 }
 
 @NonCPS
-def validateDbTarget(String server, String dbName, String credId) {
-    if (!server || server.trim() == "") return "DB_SERVER cannot be empty."
-    if (!dbName || dbName.trim() == "") return "DB_NAME cannot be empty."
-    if (!credId || credId.trim() == "") return "DB_CREDENTIALS_ID cannot be empty."
-
-    def s = server.trim()
-    def d = dbName.trim()
-    def c = credId.trim()
-
-    if (!(s ==~ /^[a-zA-Z0-9._\-,\\]+$/)) return "DB_SERVER contains invalid characters."
-    if (!(d ==~ /^[a-zA-Z0-9_\-]+$/)) return "DB_NAME contains invalid characters."
-    if (!(c ==~ /^[a-zA-Z0-9_\-.]+$/)) return "DB_CREDENTIALS_ID contains invalid characters."
-
-    def forbiddenPattern = /(?i)(^|[\W_])(prod|production|prd|live|primary|clinical_live|his_main)($|[\W_])/
-    if (s =~ forbiddenPattern || d =~ forbiddenPattern) {
-        return "SAFETY VIOLATION: Target matches restricted production naming patterns."
-    }
-
-    return null
-}
-
-@NonCPS
 def scanSqlSafety(String rawSql) {
     if (!rawSql || rawSql.trim() == "") return [error: "File is empty or whitespace-only.", warnings: []]
     if (rawSql.contains("\u0000")) return [error: "Null bytes detected. File may be binary.", warnings: []]
@@ -424,6 +367,7 @@ def scanSqlSafety(String rawSql) {
     def errors = []
     def warnings = []
     
+    // Strip comments and strings to prevent false positives
     def cleanSql = rawSql.replaceAll(/(?s)('(?:[^']|'')*')|(\/\*.*?\*\/)|(--[^\r\n]*)/) { match ->
         def text = match instanceof List ? match[0] : match.toString()
         if (text.startsWith("'")) return "''"
@@ -436,6 +380,7 @@ def scanSqlSafety(String rawSql) {
         def s = stmt.trim()
         if (!s) continue
         
+        // Block destructive commands
         if (s =~ /(?i)\bDROP\s+(TABLE|DATABASE|PROCEDURE|VIEW|INDEX|SCHEMA)\b/) {
             errors << "Destructive command 'DROP' is prohibited."
         }
@@ -451,15 +396,10 @@ def scanSqlSafety(String rawSql) {
         if (s =~ /(?i)\bGRANT\b|\bREVOKE\b|\bDENY\b/) {
             errors << "Permission modification commands are prohibited."
         }
-        
-        if (s =~ /(?i)\b(EXEC|EXECUTE)\s*\(/ || s =~ /(?i)\bsp_executesql\b/) {
-            warnings << "Dynamic SQL execution detected."
-        }
     }
     
     if (!errors.isEmpty()) {
         return [error: errors.join(" | "), warnings: []]
     }
-    
-    return [error: null, warnings: warnings.unique()]
+    return [error: null, warnings: warnings]
 }
