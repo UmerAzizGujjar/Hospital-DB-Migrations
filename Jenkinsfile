@@ -72,10 +72,9 @@ pipeline {
         stage('StageSelect Migration') {
             steps {
                 script {
-                    // 1. Discover using robust PowerShell logic.
-                    // - Distinguishes missing path, non-directory, empty directory, and genuine enumeration failures.
-                    // - $ErrorActionPreference = 'Stop' ensures unexpected IO/permission errors fail the step naturally.
-                    def psScript = '''
+                    // 1. Discover files AND get Git timestamps/ages in a single PowerShell step
+                    //    (Avoids Windows batch %ct / %%ct escaping issues completely)
+                    def psDiscoverAndGit = '''
                         $ErrorActionPreference = 'Stop'
                         $path = $env:MIGRATION_DIR
                         
@@ -96,10 +95,24 @@ pipeline {
                             exit 0
                         }
                         
-                        $files.Name
+                        foreach ($f in $files) {
+                            $relPath = "$path/$($f.Name)"
+                            $ct = ""
+                            $cr = ""
+                            try {
+                                $ct = (git log -1 --format="%ct" -- $relPath 2>$null) | Select-Object -Last 1
+                                $cr = (git log -1 --format="%cr" -- $relPath 2>$null) | Select-Object -Last 1
+                            } catch {
+                                $ct = "0"
+                                $cr = "Unknown age"
+                            }
+                            if ([string]::IsNullOrWhiteSpace($ct)) { $ct = "0" }
+                            if ([string]::IsNullOrWhiteSpace($cr)) { $cr = "Unknown age" }
+                            Write-Output "$($f.Name)|$($ct.Trim())|$($cr.Trim())"
+                        }
                     '''
                     
-                    def dirOutput = powershell(script: psScript, returnStdout: true).trim()
+                    def dirOutput = powershell(script: psDiscoverAndGit, returnStdout: true).trim()
 
                     if (dirOutput.contains("ERROR_MISSING")) {
                         error "Validation Failed: The path ${env.MIGRATION_DIR}\\ does not exist."
@@ -107,34 +120,22 @@ pipeline {
                     if (dirOutput.contains("ERROR_NOT_DIR")) {
                         error "Validation Failed: The path ${env.MIGRATION_DIR}\\ exists but is not a directory."
                     }
-                    if (dirOutput.contains("ERROR_EMPTY")) {
+                    if (dirOutput.contains("ERROR_EMPTY") || !dirOutput) {
                         error "No SQL migration files found in ${env.MIGRATION_DIR}\\ directory."
                     }
                     
-                    def rawFiles = dirOutput.split('\r?\n').collect { it.trim() }.findAll { it && !it.startsWith("ERROR_") }
+                    def lines = dirOutput.split('\r?\n').collect { it.trim() }.findAll { it && it.contains('|') }
                     
                     def fileObjects = []
-                    for (f in rawFiles) {
-                        def cTimeOut = bat(script: "@echo off && git log -1 --format=%ct -- \"${env.MIGRATION_DIR}\\${f}\"", returnStdout: true).trim()
-                        def relAgeOut = bat(script: "@echo off && git log -1 --format=%cr -- \"${env.MIGRATION_DIR}\\${f}\"", returnStdout: true).trim()
+                    for (line in lines) {
+                        def parts = line.tokenize('|')
+                        def fName = parts[0]
+                        def cTimeStr = parts.size() > 1 ? parts[1] : "0"
+                        def relAge = parts.size() > 2 ? parts[2] : "Unknown age"
                         
-                        // Extract ONLY the last line so any echoed batch output doesn't break the dropdown
-                        def cTimeLines = cTimeOut ? cTimeOut.readLines() : []
-                        def relAgeLines = relAgeOut ? relAgeOut.readLines() : []
-                        
-                        def cTimeStr = cTimeLines ? cTimeLines.last().trim() : ""
-                        def relAge = relAgeLines ? relAgeLines.last().trim() : ""
-                        
-                        long cTime = 0
-                        if (cTimeStr && cTimeStr.isNumber()) {
-                            cTime = cTimeStr.toLong()
-                        } else {
-                            relAge = "Unknown age"
-                        }
-                        
-                        // Ensure single-line clean label for Jenkins choice dropdown
-                        def choiceStr = "${f} (${relAge})".replaceAll(/[\r\n]+/, ' ')
-                        fileObjects << [name: f, timestamp: cTime, ageDisplay: relAge, choiceLabel: choiceStr]
+                        long cTime = cTimeStr.isNumber() ? cTimeStr.toLong() : 0L
+                        def choiceStr = "${fName} (${relAge})"
+                        fileObjects << [name: fName, timestamp: cTime, ageDisplay: relAge, choiceLabel: choiceStr]
                     }
                     
                     // 2. Sort by Git timestamp (newest first)
@@ -148,13 +149,14 @@ pipeline {
                         error "Pre-Validation Failed: Ambiguous deployment state. ${duplicateError}"
                     }
                     
-                    def choices = fileObjects.collect { it.choiceLabel }
+                    // Pass a List<String> to choice() so Jenkins renders the dropdown properly in all UI views
+                    List<String> choicesList = fileObjects.collect { it.choiceLabel.toString() }
 
-                    // 4. Interactive prompt (Explicit ChoiceParameterDefinition for Pipeline Stage View UI)
+                    // 4. Interactive prompt
                     env.SELECTED_CHOICE = input(
                         message: "Select a migration (${params.EXECUTION_MODE}):",
                         parameters: [
-                            [$class: 'ChoiceParameterDefinition', name: 'MIGRATION_FILE', choices: choices.join('\n'), description: 'Select the file and view its commit age']
+                            choice(name: 'MIGRATION_FILE', choices: choicesList, description: 'Select the file and view its commit age')
                         ]
                     )
                     
