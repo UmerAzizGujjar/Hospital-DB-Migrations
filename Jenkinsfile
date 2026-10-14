@@ -13,12 +13,18 @@ pipeline {
         string(
             name: 'DB_SERVER',
             defaultValue: 'WIN-U6S7JB4ANMN',
-            description: 'Demo/Test SQL Server host/instance (e.g., WIN-U6S7JB4ANMN or localhost,1433). Production hosts are strictly blocked.'
+            description: 'Demo/Test SQL Server host/instance. Production hosts are strictly blocked.'
         )
-        string(
-            name: 'DB_NAME',
-            defaultValue: 'STH_U_ASIRAAT',
-            description: 'Target Demo/Test Database Name (Must NOT be a production database).'
+        choice(
+            name: 'TARGET_HOSPITAL',
+            choices: [
+                'STH_U_ASIRAAT',
+                'H_U_ASSIRAAT',
+                'H_U_Kaleem',
+                'H_U_Nazeer',
+                'H_U_NHMC'
+            ],
+            description: 'Select the target hospital database branch for this migration run.'
         )
         string(
             name: 'DB_CREDENTIALS_ID',
@@ -28,7 +34,7 @@ pipeline {
         choice(
             name: 'EXECUTION_MODE',
             choices: ['DRY_RUN_ROLLBACK', 'COMMIT_CHANGES', 'HEALTH_CHECK_ONLY'],
-            description: 'DRY_RUN_ROLLBACK: Runs the SQL migration inside a transaction to test CREATE/ALTER/DDL, then rolls back.\nCOMMIT_CHANGES: Permanently applies the migration to the Test DB.\nHEALTH_CHECK_ONLY: Only runs SELECT 1.'
+            description: 'DRY_RUN_ROLLBACK: Runs the SQL migration inside a transaction to test CREATE/ALTER/DDL, then rolls back.\nCOMMIT_CHANGES: Permanently applies the migration to the selected hospital DB.\nHEALTH_CHECK_ONLY: Only runs SELECT 1.'
         )
     }
 
@@ -49,15 +55,20 @@ pipeline {
                         error "This pipeline requires a Windows agent."
                     }
 
+                    // Map selected hospital choice to DB_NAME environment variable
+                    env.TARGET_DB_NAME = params.TARGET_HOSPITAL.trim()
+                    env.TARGET_DB_SERVER = params.DB_SERVER.trim()
+
                     def dbTargetError = validateDbTarget(
-                        params.DB_SERVER,
-                        params.DB_NAME,
+                        env.TARGET_DB_SERVER,
+                        env.TARGET_DB_NAME,
                         params.DB_CREDENTIALS_ID
                     )
                     if (dbTargetError) {
                         error "Preflight DB Target Validation Failed: ${dbTargetError}"
                     }
-                    echo "Preflight DB Target Check: Verified non-production target [${params.DB_SERVER} / ${params.DB_NAME}]."
+                    echo "Preflight DB Target Check: Verified non-production target [${env.TARGET_DB_SERVER} / ${env.TARGET_DB_NAME}]."
+                    echo "Selected Hospital Database: ${env.TARGET_DB_NAME}"
                     echo "Selected Execution Mode: ${params.EXECUTION_MODE}"
                 }
             }
@@ -148,7 +159,7 @@ pipeline {
                     List<String> choicesList = fileObjects.collect { it.choiceLabel.toString() }
 
                     env.SELECTED_CHOICE = input(
-                        message: "Select a migration (${params.EXECUTION_MODE}):",
+                        message: "Hospital [${env.TARGET_DB_NAME}] - Select a migration (${params.EXECUTION_MODE}):",
                         parameters: [
                             choice(name: 'MIGRATION_FILE', choices: choicesList, description: 'Select the file and view its commit age')
                         ]
@@ -207,14 +218,12 @@ pipeline {
                 script {
                     if (params.EXECUTION_MODE == 'COMMIT_CHANGES') {
                         input(
-                            message: "CONFIRMATION: Permanently apply ${env.SELECTED_FILENAME} to Test DB [${params.DB_NAME}]?",
+                            message: "CONFIRMATION: Permanently apply ${env.SELECTED_FILENAME} to Hospital DB [${env.TARGET_DB_NAME}]?",
                             ok: "Yes, Commit Migration"
                         )
                     }
 
-                    env.TARGET_DB_SERVER = params.DB_SERVER.trim()
-                    env.TARGET_DB_NAME   = params.DB_NAME.trim()
-                    env.EXEC_MODE        = params.EXECUTION_MODE
+                    env.EXEC_MODE = params.EXECUTION_MODE
 
                     withCredentials([usernamePassword(
                         credentialsId: params.DB_CREDENTIALS_ID.trim(),
@@ -263,12 +272,12 @@ pipeline {
                                     $cmd.CommandTimeout = 60
                                     $cmd.CommandText = $trimmed
                                     $rows = $cmd.ExecuteNonQuery()
-                                    Write-Output "Executed Batch #$batchNum successfully."
+                                    Write-Output "Executed Batch #$batchNum successfully against branch $env:TARGET_DB_NAME."
                                 }
 
                                 if ($env:EXEC_MODE -eq "DRY_RUN_ROLLBACK") {
                                     $tran.Rollback()
-                                    Write-Output "DRY_RUN_ROLLBACK_COMPLETE: All CREATE/ALTER batches executed against real schema, then safely rolled back."
+                                    Write-Output "DRY_RUN_ROLLBACK_COMPLETE: All CREATE/ALTER batches executed against hospital DB [$env:TARGET_DB_NAME], then safely rolled back."
                                 }
                                 elseif ($env:EXEC_MODE -eq "COMMIT_CHANGES") {
                                     $histCmd = $conn.CreateCommand()
@@ -288,7 +297,7 @@ pipeline {
                                     $null = $histCmd.ExecuteNonQuery()
 
                                     $tran.Commit()
-                                    Write-Output "COMMIT_CHANGES_COMPLETE: Migration permanently committed and logged in dbo.JenkinsMigrationHistory."
+                                    Write-Output "COMMIT_CHANGES_COMPLETE: Migration permanently committed for hospital [$env:TARGET_DB_NAME] and logged in dbo.JenkinsMigrationHistory."
                                 }
                             }
                             catch {
@@ -317,7 +326,7 @@ pipeline {
                         def status = powershell(script: sqlRunnerPs, returnStatus: true)
                         if (status != 0) {
                             env.DB_EXEC_STATUS = "FAILED"
-                            error "Database execution failed in mode [${params.EXECUTION_MODE}]. Any open transaction was automatically rolled back."
+                            error "Database execution failed for hospital [${env.TARGET_DB_NAME}] in mode [${params.EXECUTION_MODE}]."
                         }
                         env.DB_EXEC_STATUS = "PASSED (${params.EXECUTION_MODE})"
                     }
@@ -337,8 +346,8 @@ pipeline {
                     echo "Line Count          : ${env.FILE_LINE_COUNT} lines"
                     echo "Validation Checks   : PASSED (Strict Policy Enforced)"
                     echo "Safety Warnings     : ${env.SAFETY_WARNINGS}"
-                    echo "Target Test Server  : ${params.DB_SERVER}"
-                    echo "Target Test DB      : ${params.DB_NAME}"
+                    echo "Target Server       : ${env.TARGET_DB_SERVER}"
+                    echo "Target Hospital DB  : ${env.TARGET_DB_NAME}"
                     echo "Execution Mode      : ${params.EXECUTION_MODE}"
                     echo "Database Result     : ${env.DB_EXEC_STATUS}"
                     echo "====================================================="
@@ -415,7 +424,6 @@ def scanSqlSafety(String rawSql) {
     def errors = []
     def warnings = []
     
-    // Erase comments and strings so we don't trigger false positives
     def cleanSql = rawSql.replaceAll(/(?s)('(?:[^']|'')*')|(\/\*.*?\*\/)|(--[^\r\n]*)/) { match ->
         def text = match instanceof List ? match[0] : match.toString()
         if (text.startsWith("'")) return "''"
@@ -428,7 +436,6 @@ def scanSqlSafety(String rawSql) {
         def s = stmt.trim()
         if (!s) continue
         
-        // --- STRICTLY BLOCKED COMMANDS (Causes Pipeline to Fail Immediately) ---
         if (s =~ /(?i)\bDROP\s+(TABLE|DATABASE|PROCEDURE|VIEW|INDEX|SCHEMA)\b/) {
             errors << "Destructive command 'DROP' is prohibited."
         }
@@ -445,7 +452,6 @@ def scanSqlSafety(String rawSql) {
             errors << "Permission modification commands are prohibited."
         }
         
-        // --- ALLOWED / FLAGGED FOR REVIEW ---
         if (s =~ /(?i)\b(EXEC|EXECUTE)\s*\(/ || s =~ /(?i)\bsp_executesql\b/) {
             warnings << "Dynamic SQL execution detected."
         }
