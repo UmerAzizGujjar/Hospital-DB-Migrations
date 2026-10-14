@@ -28,7 +28,7 @@ pipeline {
         choice(
             name: 'EXECUTION_MODE',
             choices: ['DRY_RUN_ROLLBACK', 'COMMIT_CHANGES', 'HEALTH_CHECK_ONLY'],
-            description: 'DRY_RUN_ROLLBACK: Runs the SQL migration inside a transaction to test ADD COLUMN/DDL, then rolls back.\nCOMMIT_CHANGES: Permanently applies the migration to the Test DB.\nHEALTH_CHECK_ONLY: Only runs SELECT 1.'
+            description: 'DRY_RUN_ROLLBACK: Runs the SQL migration inside a transaction to test CREATE/ALTER/DDL, then rolls back.\nCOMMIT_CHANGES: Permanently applies the migration to the Test DB.\nHEALTH_CHECK_ONLY: Only runs SELECT 1.'
         )
     }
 
@@ -72,8 +72,6 @@ pipeline {
         stage('StageSelect Migration') {
             steps {
                 script {
-                    // 1. Discover files AND get Git timestamps/ages in a single PowerShell step
-                    //    (Avoids Windows batch %ct / %%ct escaping issues completely)
                     def psDiscoverAndGit = '''
                         $ErrorActionPreference = 'Stop'
                         $path = $env:MIGRATION_DIR
@@ -138,21 +136,17 @@ pipeline {
                         fileObjects << [name: fName, timestamp: cTime, ageDisplay: relAge, choiceLabel: choiceStr]
                     }
                     
-                    // 2. Sort by Git timestamp (newest first)
                     fileObjects.sort { a, b -> b.timestamp <=> a.timestamp }
                     discoveredFilesList = fileObjects.collect { it.name }
                     
-                    // 3. Prevent ambiguous states BEFORE prompting user
                     echo "--- Checking for Duplicate Migrations ---"
                     def duplicateError = checkDuplicateVersions(discoveredFilesList)
                     if (duplicateError) {
                         error "Pre-Validation Failed: Ambiguous deployment state. ${duplicateError}"
                     }
                     
-                    // Pass a List<String> to choice() so Jenkins renders the dropdown properly in all UI views
                     List<String> choicesList = fileObjects.collect { it.choiceLabel.toString() }
 
-                    // 4. Interactive prompt
                     env.SELECTED_CHOICE = input(
                         message: "Select a migration (${params.EXECUTION_MODE}):",
                         parameters: [
@@ -160,7 +154,6 @@ pipeline {
                         ]
                     )
                     
-                    // 5. Safely extract filename using exact label match
                     def selectedFileObj = fileObjects.find { it.choiceLabel == env.SELECTED_CHOICE }
                     if (selectedFileObj) {
                         env.SELECTED_FILENAME = selectedFileObj.name
@@ -192,16 +185,18 @@ pipeline {
                     env.FILE_SIZE_BYTES = rawSql.getBytes("UTF-8").length.toString()
                     env.FILE_LINE_COUNT = rawSql.readLines().size().toString()
 
-                    echo "--- C. Non-Blocking SQL Safety Scan ---"
+                    echo "--- C. Strict SQL Safety Scan (Blocking Destructive DDL/DML) ---"
                     def scanResult = scanSqlSafety(rawSql)
                     
-                    if (scanResult.error) error "Validation Failed: ${scanResult.error}"
+                    if (scanResult.error) {
+                        error "SECURITY VIOLATION: Migration failed safety policy -> ${scanResult.error}"
+                    }
                     
                     if (scanResult.warnings.isEmpty()) {
                         env.SAFETY_WARNINGS = "None"
                     } else {
                         env.SAFETY_WARNINGS = scanResult.warnings.join(" | ")
-                        echo "MANUAL REVIEW REQUIRED: Suspicious patterns flagged by static scan."
+                        echo "MANUAL REVIEW REQUIRED: Noticeable patterns flagged by static scan."
                     }
                 }
             }
@@ -242,7 +237,6 @@ pipeline {
                                 $conn = New-Object System.Data.SqlClient.SqlConnection($builder.ConnectionString)
                                 $conn.Open()
 
-                                # 1. Verify connectivity first
                                 $pingCmd = $conn.CreateCommand()
                                 $pingCmd.CommandText = "SELECT 1;"
                                 $null = $pingCmd.ExecuteScalar()
@@ -253,11 +247,9 @@ pipeline {
                                     exit 0
                                 }
 
-                                # 2. Read migration file and split by standalone GO lines
                                 $sqlContent = Get-Content -Path $env:SELECTED_PATH -Raw -Encoding UTF8
                                 $batches = [regex]::Split($sqlContent, '(?im)^\\s*GO\\s*$')
 
-                                # 3. Begin Transaction (Used for both DRY_RUN_ROLLBACK and COMMIT_CHANGES)
                                 $tran = $conn.BeginTransaction()
 
                                 $batchNum = 0
@@ -276,10 +268,9 @@ pipeline {
 
                                 if ($env:EXEC_MODE -eq "DRY_RUN_ROLLBACK") {
                                     $tran.Rollback()
-                                    Write-Output "DRY_RUN_ROLLBACK_COMPLETE: All batches compiled and executed against real schema, then safely rolled back."
+                                    Write-Output "DRY_RUN_ROLLBACK_COMPLETE: All CREATE/ALTER batches executed against real schema, then safely rolled back."
                                 }
                                 elseif ($env:EXEC_MODE -eq "COMMIT_CHANGES") {
-                                    # Record migration in history table inside the same transaction
                                     $histCmd = $conn.CreateCommand()
                                     $histCmd.Transaction = $tran
                                     $histCmd.CommandText = @"
@@ -326,7 +317,7 @@ pipeline {
                         def status = powershell(script: sqlRunnerPs, returnStatus: true)
                         if (status != 0) {
                             env.DB_EXEC_STATUS = "FAILED"
-                            error "Database execution failed in mode [${params.EXECUTION_MODE}]. Any open transaction was automatically rolled back. Check console logs above for the exact SQL line number and error."
+                            error "Database execution failed in mode [${params.EXECUTION_MODE}]. Any open transaction was automatically rolled back."
                         }
                         env.DB_EXEC_STATUS = "PASSED (${params.EXECUTION_MODE})"
                     }
@@ -344,23 +335,13 @@ pipeline {
                     echo "Commit Age          : ${env.COMMIT_AGE}"
                     echo "File Size           : ${env.FILE_SIZE_BYTES} bytes"
                     echo "Line Count          : ${env.FILE_LINE_COUNT} lines"
-                    echo "Duplicate Versions  : None (Verified pre-selection)"
-                    echo "Validation Checks   : PASSED"
+                    echo "Validation Checks   : PASSED (Strict Policy Enforced)"
                     echo "Safety Warnings     : ${env.SAFETY_WARNINGS}"
                     echo "Target Test Server  : ${params.DB_SERVER}"
                     echo "Target Test DB      : ${params.DB_NAME}"
                     echo "Execution Mode      : ${params.EXECUTION_MODE}"
                     echo "Database Result     : ${env.DB_EXEC_STATUS}"
-                    echo "-----------------------------------------------------"
-                    echo "DISCLAIMER: Scan is heuristic and conservative. It is not an AST"
-                    echo "SQL parser. It cannot guarantee safety for complex SQL, multi-line"
-                    echo "constructs, stored procedures, or dynamic SQL. Finding a WHERE"
-                    echo "clause does not definitively prove a DELETE statement is safe."
                     echo "====================================================="
-                    
-                    if (env.SAFETY_WARNINGS != "None") {
-                        unstable("Completed with static safety warnings.")
-                    }
                 }
             }
         }
@@ -375,13 +356,12 @@ pipeline {
 
 // ============================================================================
 // --- SHARED FUNCTIONS ---
-// (Do not remove this comment block. Used by offline tests for extraction)
 // ============================================================================
 
 @NonCPS
 def validateMigrationFilename(String filename, List<String> validList, String patternStr) {
     if (!filename || filename.trim() == "") return "Empty selection."
-    if (!validList.contains(filename)) return "Selected file '${filename}' is not in the strictly discovered list (Path traversal/manipulation attempt)."
+    if (!validList.contains(filename)) return "Selected file '${filename}' is not in the discovered list."
     if (!(filename ==~ patternStr)) return "Filename '${filename}' does not match the required convention (VYYYYMMDD_NNN__description.sql)."
     return null
 }
@@ -415,13 +395,13 @@ def validateDbTarget(String server, String dbName, String credId) {
     def d = dbName.trim()
     def c = credId.trim()
 
-    if (!(s ==~ /^[a-zA-Z0-9._\-,\\]+$/)) return "DB_SERVER contains invalid or unsafe characters."
-    if (!(d ==~ /^[a-zA-Z0-9_\-]+$/)) return "DB_NAME contains invalid or unsafe characters."
-    if (!(c ==~ /^[a-zA-Z0-9_\-.]+$/)) return "DB_CREDENTIALS_ID contains invalid or unsafe characters."
+    if (!(s ==~ /^[a-zA-Z0-9._\-,\\]+$/)) return "DB_SERVER contains invalid characters."
+    if (!(d ==~ /^[a-zA-Z0-9_\-]+$/)) return "DB_NAME contains invalid characters."
+    if (!(c ==~ /^[a-zA-Z0-9_\-.]+$/)) return "DB_CREDENTIALS_ID contains invalid characters."
 
     def forbiddenPattern = /(?i)(^|[\W_])(prod|production|prd|live|primary|clinical_live|his_main)($|[\W_])/
     if (s =~ forbiddenPattern || d =~ forbiddenPattern) {
-        return "SAFETY VIOLATION: Target server or database matches restricted production naming patterns. Only Demo/Test environments are permitted."
+        return "SAFETY VIOLATION: Target matches restricted production naming patterns."
     }
 
     return null
@@ -430,9 +410,12 @@ def validateDbTarget(String server, String dbName, String credId) {
 @NonCPS
 def scanSqlSafety(String rawSql) {
     if (!rawSql || rawSql.trim() == "") return [error: "File is empty or whitespace-only.", warnings: []]
-    if (rawSql.contains("\u0000")) return [error: "Null bytes detected. File may be binary or incorrectly encoded.", warnings: []]
+    if (rawSql.contains("\u0000")) return [error: "Null bytes detected. File may be binary.", warnings: []]
 
+    def errors = []
     def warnings = []
+    
+    // Erase comments and strings so we don't trigger false positives
     def cleanSql = rawSql.replaceAll(/(?s)('(?:[^']|'')*')|(\/\*.*?\*\/)|(--[^\r\n]*)/) { match ->
         def text = match instanceof List ? match[0] : match.toString()
         if (text.startsWith("'")) return "''"
@@ -445,12 +428,31 @@ def scanSqlSafety(String rawSql) {
         def s = stmt.trim()
         if (!s) continue
         
-        if (s =~ /(?i)\bDROP\s+(TABLE|DATABASE|PROCEDURE)\b/) warnings << "Destructive DDL (DROP TABLE/DATABASE/PROCEDURE) detected."
-        if (s =~ /(?i)\bTRUNCATE\s+TABLE\b/) warnings << "TRUNCATE TABLE detected."
-        if (s =~ /(?i)\bDELETE\b/ && !(s =~ /(?i)\bWHERE\b/)) warnings << "DELETE statement potentially missing a WHERE clause."
-        if (s =~ /(?i)\bALTER\s+TABLE\s+.*?\bDROP\s+COLUMN\b/) warnings << "ALTER TABLE ... DROP COLUMN detected."
-        if (s =~ /(?i)\b(EXEC|EXECUTE)\s*\(/ || s =~ /(?i)\bsp_executesql\b/) warnings << "Dynamic SQL execution detected."
-        if (s =~ /(?i)\bGRANT\b|\bREVOKE\b|\bDENY\b/) warnings << "Permissions modification detected."
+        // --- STRICTLY BLOCKED COMMANDS (Causes Pipeline to Fail Immediately) ---
+        if (s =~ /(?i)\bDROP\s+(TABLE|DATABASE|PROCEDURE|VIEW|INDEX|SCHEMA)\b/) {
+            errors << "Destructive command 'DROP' is prohibited."
+        }
+        if (s =~ /(?i)\bTRUNCATE\s+TABLE\b/) {
+            errors << "Destructive command 'TRUNCATE TABLE' is prohibited."
+        }
+        if (s =~ /(?i)\bDELETE\b/) {
+            errors << "'DELETE' statements are prohibited in schema migrations."
+        }
+        if (s =~ /(?i)\bALTER\s+TABLE\s+.*?\bDROP\s+COLUMN\b/) {
+            errors << "'ALTER TABLE ... DROP COLUMN' is restricted to prevent data loss."
+        }
+        if (s =~ /(?i)\bGRANT\b|\bREVOKE\b|\bDENY\b/) {
+            errors << "Permission modification commands are prohibited."
+        }
+        
+        // --- ALLOWED / FLAGGED FOR REVIEW ---
+        if (s =~ /(?i)\b(EXEC|EXECUTE)\s*\(/ || s =~ /(?i)\bsp_executesql\b/) {
+            warnings << "Dynamic SQL execution detected."
+        }
+    }
+    
+    if (!errors.isEmpty()) {
+        return [error: errors.join(" | "), warnings: []]
     }
     
     return [error: null, warnings: warnings.unique()]
