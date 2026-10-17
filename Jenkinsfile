@@ -44,7 +44,7 @@ def scanSqlSafety(String rawSql) {
 }
 
 pipeline {
-    agent none // Enforces per-stage agent routing
+    agent none 
 
     parameters {
         choice(name: 'HOSPITAL', 
@@ -61,7 +61,6 @@ pipeline {
     }
 
     environment {
-        // Strict Agent Routing
         AGENT_LABEL = "${params.HOSPITAL == 'PAKRED' ? 'PAKRED_LIVE_SERVER' : 'UNMAPPED_NODE'}"
         DB_SERVER_HOSTNAME = "WIN-APTS20MHM62"
         SQL_CREDENTIAL_ID = "sql-credentials-${params.HOSPITAL.toLowerCase()}" 
@@ -78,10 +77,12 @@ pipeline {
                     }
                 }
                 
-                checkout scm
+                // Explicit Git checkout using your GitHub credential ID
+                git branch: 'main', 
+                    credentialsId: 'f2d6a7df-0fbc-46ae-a972-2aeb85e24bba', 
+                    url: 'https://github.com/UmerAzizGujjar/Hospital-DB-Migrations.git'
                 
                 script {
-                    // Use PowerShell to discover all .sql files inside the 'migrations' directory
                     def psOutput = powershell(script: '''
                         $ErrorActionPreference = 'Stop'
                         if (Test-Path "migrations") {
@@ -89,7 +90,6 @@ pipeline {
                         }
                     ''', returnStdout: true).trim()
 
-                    // Parse the raw PowerShell output into a Groovy list
                     discoveredFilesList = psOutput.split('\r?\n').collect { it.trim() }.findAll { it }
 
                     if (discoveredFilesList.isEmpty()) {
@@ -102,10 +102,9 @@ pipeline {
         }
 
         stage('Select Migration') {
-            agent none // Drops the agent to free up the server executor while waiting for your input
+            agent none 
             steps {
                 script {
-                    // Generate an interactive UI dropdown prompt in Jenkins
                     def selectedFile = input(
                         message: "Select a Migration File to deploy to ${params.TARGET_DATABASE}:",
                         parameters: [
@@ -113,7 +112,6 @@ pipeline {
                         ]
                     )
                     
-                    // Assign the selected filename and its full path to environment variables
                     env.SELECTED_FILENAME = selectedFile
                     env.MIGRATION_SCRIPT = "migrations\\${selectedFile}"
                     
@@ -126,7 +124,6 @@ pipeline {
             agent { label "${AGENT_LABEL}" }
             steps {
                 script {
-                    // Regex format validation
                     if (!(env.SELECTED_FILENAME ==~ env.REGEX_PATTERN)) {
                         error "Validation Failed: Filename '${env.SELECTED_FILENAME}' does not match pattern (VYYYYMMDD_NNN__description.sql)."
                     }
@@ -135,7 +132,6 @@ pipeline {
                         error "Validation Failed: File ${env.MIGRATION_SCRIPT} not found."
                     }
 
-                    // Advanced Groovy Regex Scan
                     def rawSql = readFile(file: env.MIGRATION_SCRIPT, encoding: 'UTF-8')
                     def scanResult = scanSqlSafety(rawSql)
                     
@@ -191,7 +187,6 @@ pipeline {
                             $conn = New-Object System.Data.SqlClient.SqlConnection($builder.ConnectionString)
                             $conn.Open()
 
-                            # Health Check Mode
                             $pingCmd = $conn.CreateCommand()
                             $pingCmd.CommandText = "SELECT 1;"
                             $null = $pingCmd.ExecuteScalar()
@@ -202,7 +197,6 @@ pipeline {
                                 exit 0
                             }
 
-                            # Execution Modes
                             $sqlContent = Get-Content -Path $env:MIGRATION_SCRIPT -Raw -Encoding UTF8
                             $batches = [regex]::Split($sqlContent, '(?im)^\\s*GO\\s*$')
 
