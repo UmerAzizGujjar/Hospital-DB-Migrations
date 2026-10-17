@@ -1,4 +1,7 @@
-// Shared helper functions
+// Global variable to hold the list of discovered files
+def discoveredFilesList = []
+
+// Shared helper function for the safety scan
 @NonCPS
 def scanSqlSafety(String rawSql) {
     if (!rawSql || rawSql.trim() == "") return [error: "File is empty or whitespace-only."]
@@ -52,10 +55,6 @@ pipeline {
                defaultValue: 'pakred_uat', 
                description: '<b>Database Name:</b> Enter the target SQL Server database.')
                
-        string(name: 'MIGRATION_SCRIPT', 
-               defaultValue: 'migrations/V20261013_001__pipeline_smoke_test.sql', 
-               description: '<b>Migration Script:</b> Enter the relative path to the .sql file.')
-               
         choice(name: 'EXECUTION_MODE',
                choices: ['DRY_RUN_ROLLBACK', 'COMMIT_CHANGES', 'HEALTH_CHECK_ONLY'],
                description: '<b>Mode:</b><br>DRY_RUN_ROLLBACK: Test inside a transaction and revert.<br>COMMIT_CHANGES: Apply permanently.<br>HEALTH_CHECK_ONLY: Connectivity test.')
@@ -70,7 +69,7 @@ pipeline {
     }
 
     stages {
-        stage('Validation & Safety Scan') {
+        stage('Checkout & File Discovery') {
             agent { label "${AGENT_LABEL}" }
             steps {
                 script {
@@ -82,10 +81,54 @@ pipeline {
                 checkout scm
                 
                 script {
-                    // Extract filename from path for regex validation
-                    def filename = env.MIGRATION_SCRIPT.tokenize('/')[-1].tokenize('\\')[-1]
-                    if (!(filename ==~ env.REGEX_PATTERN)) {
-                        error "Validation Failed: Filename '${filename}' does not match pattern (VYYYYMMDD_NNN__description.sql)."
+                    // Use PowerShell to discover all .sql files inside the 'migrations' directory
+                    def psOutput = powershell(script: '''
+                        $ErrorActionPreference = 'Stop'
+                        if (Test-Path "migrations") {
+                            Get-ChildItem -Path "migrations" -Filter "*.sql" -Name
+                        }
+                    ''', returnStdout: true).trim()
+
+                    // Parse the raw PowerShell output into a Groovy list
+                    discoveredFilesList = psOutput.split('\r?\n').collect { it.trim() }.findAll { it }
+
+                    if (discoveredFilesList.isEmpty()) {
+                        error "Validation Failed: No SQL files found in the 'migrations' directory."
+                    }
+                    
+                    echo "Found ${discoveredFilesList.size()} migration files."
+                }
+            }
+        }
+
+        stage('Select Migration') {
+            agent none // Drops the agent to free up the server executor while waiting for your input
+            steps {
+                script {
+                    // Generate an interactive UI dropdown prompt in Jenkins
+                    def selectedFile = input(
+                        message: "Select a Migration File to deploy to ${params.TARGET_DATABASE}:",
+                        parameters: [
+                            choice(name: 'FILE_CHOICE', choices: discoveredFilesList, description: 'Select the script you wish to execute.')
+                        ]
+                    )
+                    
+                    // Assign the selected filename and its full path to environment variables
+                    env.SELECTED_FILENAME = selectedFile
+                    env.MIGRATION_SCRIPT = "migrations\\${selectedFile}"
+                    
+                    echo "User selected: ${env.MIGRATION_SCRIPT}"
+                }
+            }
+        }
+
+        stage('Validation & Safety Scan') {
+            agent { label "${AGENT_LABEL}" }
+            steps {
+                script {
+                    // Regex format validation
+                    if (!(env.SELECTED_FILENAME ==~ env.REGEX_PATTERN)) {
+                        error "Validation Failed: Filename '${env.SELECTED_FILENAME}' does not match pattern (VYYYYMMDD_NNN__description.sql)."
                     }
 
                     if (!fileExists(env.MIGRATION_SCRIPT)) {
@@ -115,7 +158,7 @@ pipeline {
                             =========================================
                             Hospital: ${params.HOSPITAL}
                             Database: ${params.TARGET_DATABASE}
-                            Script:   ${params.MIGRATION_SCRIPT}
+                            Script:   ${env.MIGRATION_SCRIPT}
                             Mode:     ${params.EXECUTION_MODE}
                             =========================================
                             Proceed with execution?
@@ -184,7 +227,6 @@ pipeline {
                                 Write-Output "DRY_RUN_ROLLBACK_COMPLETE: Changes rolled back cleanly on $env:TARGET_DATABASE."
                             }
                             elseif ($env:EXECUTION_MODE -eq "COMMIT_CHANGES") {
-                                # Migration History Tracking
                                 $fileNameOnly = Split-Path $env:MIGRATION_SCRIPT -Leaf
                                 $histCmd = $conn.CreateCommand()
                                 $histCmd.Transaction = $tran
