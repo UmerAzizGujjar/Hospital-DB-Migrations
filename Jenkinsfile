@@ -41,11 +41,34 @@ pipeline {
             choices: ['DRY_RUN_ROLLBACK', 'COMMIT_CHANGES', 'HEALTH_CHECK_ONLY'],
             description: 'Select how the SQL should be executed'
         )
-        string(
+        
+        // This requires the "Active Choices" plugin to be installed
+        parameter([
+            $class: 'CascadeChoiceParameter',
             name: 'DATABASES',
-            defaultValue: '',
-            description: 'Comma-separated list of databases (e.g. H_U_ASSIRAAT, H_U_Kaleem)'
-        )
+            choiceType: 'PT_CHECKBOX',
+            description: 'Databases dynamically populate based on the selected TARGET_ENV',
+            referencedParameters: 'TARGET_ENV',
+            script: [
+                $class: 'GroovyScript',
+                script: [
+                    sandbox: true,
+                    script: '''
+                        if (TARGET_ENV == 'TEST') {
+                            return ['H_U_ASSIRAAT:selected', 'H_U_Kaleem:selected', 'H_U_NHMC:selected']
+                        } else if (TARGET_ENV == 'UAT') {
+                            return ['pakred_uat:selected']
+                        } else {
+                            return ['No_Databases_Configured']
+                        }
+                    '''
+                ],
+                fallbackScript: [
+                    sandbox: true,
+                    script: 'return ["Script Error"]'
+                ]
+            ]
+        ])
     }
 
     stages {
@@ -79,14 +102,16 @@ pipeline {
                         error "LIVE is disabled until its SQL Server is configured."
                     }
 
+                    // The Active Choices plugin returns the selected checkboxes as a comma-separated string,
+                    // which your existing split logic handles perfectly.
                     selectedDatabases = (params.DATABASES ?: '')
                         .toString()
                         .split(/[,;\r\n]+/)
                         .collect { it.trim() }
                         .findAll { it }
 
-                    if (!selectedDatabases) {
-                        error 'Select at least one database.'
+                    if (!selectedDatabases || selectedDatabases.contains('No_Databases_Configured')) {
+                        error 'Select at least one valid database.'
                     }
 
                     def invalidDatabases = selectedDatabases.findAll {
@@ -117,7 +142,7 @@ pipeline {
                     def fileOutput = powershell(
                         returnStdout: true,
                         script: '''
-$files = Get-ChildItem -Path .\\migration -Recurse -File -Filter '*.sql' -ErrorAction SilentlyContinue |
+$files = Get-ChildItem -Path .\\mig5rations -Recurse -File -Filter '*.sql' -ErrorAction SilentlyContinue |
     Where-Object {
         $_.Name -match '^V\\d{8}_\\d{3}__[a-zA-Z0-9_]+\\.sql$' -and
         $_.FullName -notmatch '[\\\\/]\\.git[\\\\/]'
@@ -135,7 +160,7 @@ $files | Sort-Object
                         : []
 
                     if (!migrationFiles) {
-                        error 'No valid migration files were found in the migration folder.'
+                        error 'No valid migration files were found in the mig5rations folder.'
                     }
 
                     selectedMigration = input(
@@ -145,7 +170,7 @@ $files | Sort-Object
                             choice(
                                 name: 'MIGRATION_FILE',
                                 choices: migrationFiles.join('\n'),
-                                description: 'Choose one migration file from the migration folder.'
+                                description: 'Choose one migration file from the mig5rations folder.'
                             )
                         ]
                     ).toString()
