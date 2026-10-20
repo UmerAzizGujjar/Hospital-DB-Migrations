@@ -41,32 +41,25 @@ pipeline {
             choices: ['DRY_RUN_ROLLBACK', 'COMMIT_CHANGES', 'HEALTH_CHECK_ONLY'],
             description: 'Select how the SQL should be executed'
         )
-        parameter([
-            $class: 'CascadeChoiceParameter',
+        reactiveChoice(
             name: 'DATABASES',
             choiceType: 'PT_CHECKBOX',
             description: 'Databases dynamically populate based on the selected TARGET_ENV',
             referencedParameters: 'TARGET_ENV',
-            script: [
-                $class: 'GroovyScript',
-                script: [
-                    sandbox: true,
-                    script: '''
-                        if (TARGET_ENV == 'TEST') {
-                            return ['H_U_ASSIRAAT:selected', 'H_U_Kaleem:selected', 'H_U_NHMC:selected']
-                        } else if (TARGET_ENV == 'UAT') {
-                            return ['pakred_uat:selected']
-                        } else {
-                            return ['No_Databases_Configured']
-                        }
-                    '''
-                ],
-                fallbackScript: [
-                    sandbox: true,
-                    script: 'return ["Script Error"]'
-                ]
-            ]
-        ])
+            script: groovyScript(
+                script: '''
+                    if (TARGET_ENV == 'TEST') {
+                        return ['H_U_ASSIRAAT:selected', 'H_U_Kaleem:selected', 'H_U_NHMC:selected']
+                    } else if (TARGET_ENV == 'UAT') {
+                        return ['pakred_uat:selected']
+                    } else {
+                        return ['No_Databases_Configured']
+                    }
+                ''',
+                fallbackScript: 'return ["Script Error"]',
+                sandbox: true
+            )
+        )
     }
 
     stages {
