@@ -21,8 +21,6 @@ def selectedMigration = ''
 
 pipeline {
     agent {
-        // Updated to use the built-in node (the Jenkins server itself)
-        // Note: If you are on an older Jenkins version, change 'built-in' to 'master'
         label 'built-in'
     }
 
@@ -30,6 +28,24 @@ pipeline {
         buildDiscarder(logRotator(numToKeepStr: '20'))
         disableConcurrentBuilds()
         timestamps()
+    }
+
+    parameters {
+        choice(
+            name: 'TARGET_ENV',
+            choices: ['TEST', 'UAT', 'LIVE'],
+            description: 'Select the target database environment'
+        )
+        choice(
+            name: 'EXECUTION_MODE',
+            choices: ['DRY_RUN_ROLLBACK', 'COMMIT_CHANGES', 'HEALTH_CHECK_ONLY'],
+            description: 'Select how the SQL should be executed'
+        )
+        string(
+            name: 'DATABASES',
+            defaultValue: '',
+            description: 'Comma-separated list of databases (e.g. H_U_ASSIRAAT, H_U_Kaleem)'
+        )
     }
 
     stages {
@@ -101,7 +117,6 @@ pipeline {
                     def fileOutput = powershell(
                         returnStdout: true,
                         script: '''
-# Updated to look specifically inside the 'migration' folder
 $files = Get-ChildItem -Path .\\migration -Recurse -File -Filter '*.sql' -ErrorAction SilentlyContinue |
     Where-Object {
         $_.Name -match '^V\\d{8}_\\d{3}__[a-zA-Z0-9_]+\\.sql$' -and
@@ -141,7 +156,6 @@ $files | Sort-Object
 
                     def sqlText = readFile(selectedMigration)
 
-                    // Guardrail: ensures the user doesn't put "USE DatabaseName" in the script
                     if (sqlText ==~ /(?s).*(?im)^\s*USE\s+.*$/) {
                         error 'USE statements are not allowed in the script. The pipeline automatically routes to the selected databases.'
                     }
@@ -185,7 +199,6 @@ Continue?
                     def mode = params.EXECUTION_MODE.toString()
                     def config = environmentConfig[target]
 
-                    // This loop automatically executes the chosen script against EVERY database selected in the UI parameters
                     for (String db in selectedDatabases) {
                         echo "Processing database: ${db}"
 
@@ -205,7 +218,6 @@ Continue?
                                 powershell '''
 $ErrorActionPreference = 'Stop'
 
-# Initial Catalog handles the database targeting automatically
 $connectionString = @(
     "Server=$env:SQL_SERVER"
     "Initial Catalog=$env:SQL_DATABASE"
