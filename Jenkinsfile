@@ -101,16 +101,36 @@ pipeline {
                     def fileOutput = powershell(
                         returnStdout: true,
                         script: '''
+$now = (Get-Date).Date
 $files = Get-ChildItem -Path .\\migrations -Recurse -File -Filter '*.sql' -ErrorAction SilentlyContinue |
     Where-Object {
         $_.Name -match '^V\\d{8}_\\d{3}__[a-zA-Z0-9_]+\\.sql$' -and
         $_.FullName -notmatch '[\\\\/]\\.git[\\\\/]'
     } |
-    ForEach-Object {
-        $_.FullName.Substring((Get-Location).Path.Length + 1)
-    }
+    Sort-Object -Property Name -Descending
 
-$files | Sort-Object
+$outputList = @()
+foreach ($f in $files) {
+    $relPath = $f.FullName.Substring((Get-Location).Path.Length + 1)
+    $timeStr = "Unknown"
+    
+    if ($f.Name -match '^V(\\d{4})(\\d{2})(\\d{2})') {
+        try {
+            $fileDate = [datetime]::new([int]$Matches[1], [int]$Matches[2], [int]$Matches[3])
+            $days = ($now - $fileDate).Days
+            if ($days -lt 0) { $timeStr = "Future date" }
+            elseif ($days -eq 0) { $timeStr = "Added today" }
+            elseif ($days -eq 1) { $timeStr = "Added 1 day ago" }
+            else { $timeStr = "Added $days days ago" }
+        } catch {
+            $timeStr = "Invalid date"
+        }
+    }
+    
+    $outputList += "$relPath | $timeStr"
+}
+
+$outputList
 '''
                     ).trim()
 
@@ -122,17 +142,20 @@ $files | Sort-Object
                         error 'No valid migration files were found in the migrations folder.'
                     }
 
-                    selectedMigration = input(
+                    def rawSelection = input(
                         message: 'Select the SQL migration to execute',
                         ok: 'Select Migration',
                         parameters: [
                             choice(
                                 name: 'MIGRATION_FILE',
                                 choices: migrationFiles.join('\n'),
-                                description: 'Choose one migration file from the migrations folder.'
+                                description: 'Files are sorted newest first.'
                             )
                         ]
                     ).toString()
+
+                    // Extract exact file path by removing the appended time string
+                    selectedMigration = rawSelection.tokenize('|')[0].trim()
 
                     if (!(selectedMigration ==~ /(?s)(?!.*(?:^|[\\\/])\.\.?(?:[\\\/]|$)).*V\d{8}_\d{3}__[a-zA-Z0-9_]+\.sql/)) {
                         error 'Invalid migration file path.'
@@ -182,24 +205,24 @@ Continue?
                     def target = params.TARGET_ENV.toString()
                     def mode = params.EXECUTION_MODE.toString()
                     def config = environmentConfig[target]
+                    def hasErrors = false // Track if any database fails
 
                     for (String db in selectedDatabases) {
-                        echo "Processing database: ${db}"
-
-                        withCredentials([
-                            usernamePassword(
-                                credentialsId: config.credentialId,
-                                usernameVariable: 'SQL_USER',
-                                passwordVariable: 'SQL_PASSWORD'
-                            )
-                        ]) {
-                            withEnv([
-                                "SQL_SERVER=${config.server}",
-                                "SQL_DATABASE=${db}",
-                                "SQL_EXECUTION_MODE=${mode}",
-                                "SQL_MIGRATION_FILE=${selectedMigration}"
+                        try {
+                            withCredentials([
+                                usernamePassword(
+                                    credentialsId: config.credentialId,
+                                    usernameVariable: 'SQL_USER',
+                                    passwordVariable: 'SQL_PASSWORD'
+                                )
                             ]) {
-                                powershell '''
+                                withEnv([
+                                    "SQL_SERVER=${config.server}",
+                                    "SQL_DATABASE=${db}",
+                                    "SQL_EXECUTION_MODE=${mode}",
+                                    "SQL_MIGRATION_FILE=${selectedMigration}"
+                                ]) {
+                                    powershell '''
 $ErrorActionPreference = 'Stop'
 
 $connectionString = @(
@@ -212,13 +235,19 @@ $connectionString = @(
     "Connect Timeout=15"
 ) -join ';'
 
-$connection = New-Object System.Data.SqlClient.SqlConnection(
-    $connectionString
-)
+$connection = New-Object System.Data.SqlClient.SqlConnection($connectionString)
+
+$handler = [System.Data.SqlClient.SqlInfoMessageEventHandler] {
+    param($sender, $eventArgs)
+    Write-Output "[$env:SQL_DATABASE] SQL MESSAGE: $($eventArgs.Message)"
+}
+$connection.add_InfoMessage($handler)
 
 try {
     $connection.Open()
-    Write-Output "Connected to $env:SQL_SERVER / $env:SQL_DATABASE"
+    Write-Output "--------------------------------------------------------"
+    Write-Output "EXECUTING ON DATABASE: $env:SQL_DATABASE"
+    Write-Output "--------------------------------------------------------"
 
     if ($env:SQL_EXECUTION_MODE -eq 'HEALTH_CHECK_ONLY') {
         $command = $connection.CreateCommand()
@@ -226,27 +255,18 @@ try {
         $result = $command.ExecuteScalar()
         $command.Dispose()
 
-        if ($result -ne 1) {
-            throw 'Health check failed.'
-        }
-
-        Write-Output 'Health check successful.'
+        if ($result -ne 1) { throw 'Health check failed.' }
+        Write-Output "[$env:SQL_DATABASE] Health check successful."
     }
     else {
         $sql = Get-Content -LiteralPath $env:SQL_MIGRATION_FILE -Raw
-
-        $batches = [regex]::Split(
-            $sql,
-            '(?im)^\\s*GO\\s*(?:--.*)?$'
-        )
-
+        $batches = [regex]::Split($sql, '(?im)^\\s*GO\\s*(?:--.*)?$')
+        
         $transaction = $connection.BeginTransaction()
 
         try {
             foreach ($batch in $batches) {
-                if ([string]::IsNullOrWhiteSpace($batch)) {
-                    continue
-                }
+                if ([string]::IsNullOrWhiteSpace($batch)) { continue }
 
                 $command = $connection.CreateCommand()
                 $command.Transaction = $transaction
@@ -254,7 +274,13 @@ try {
                 $command.CommandText = $batch
 
                 try {
-                    [void]$command.ExecuteNonQuery()
+                    $rowsAffected = $command.ExecuteNonQuery()
+                    
+                    if ($rowsAffected -ge 0) {
+                        Write-Output "[$env:SQL_DATABASE] ($rowsAffected row(s) affected)"
+                    } else {
+                        Write-Output "[$env:SQL_DATABASE] Command completed successfully."
+                    }
                 }
                 finally {
                     $command.Dispose()
@@ -263,25 +289,28 @@ try {
 
             if ($env:SQL_EXECUTION_MODE -eq 'DRY_RUN_ROLLBACK') {
                 $transaction.Rollback()
-                Write-Output 'Dry run completed; transaction rolled back.'
+                Write-Output "[$env:SQL_DATABASE] >> Dry run completed; transaction rolled back."
             }
             elseif ($env:SQL_EXECUTION_MODE -eq 'COMMIT_CHANGES') {
                 $transaction.Commit()
-                Write-Output 'Migration committed successfully.'
-            }
-            else {
-                throw 'Unsupported execution mode.'
+                Write-Output "[$env:SQL_DATABASE] >> Migration committed successfully."
             }
         }
         catch {
-            try {
+            Write-Output " "
+            Write-Output "[$env:SQL_DATABASE] !!! SQL ERROR !!!"
+            Write-Output "[$env:SQL_DATABASE] Error Details: $($_.Exception.Message)"
+            Write-Output " "
+            
+            try { 
                 $transaction.Rollback()
-            }
-            catch {
-                Write-Warning 'Rollback failed. Check the database state immediately.'
+                Write-Output "[$env:SQL_DATABASE] >> Transaction successfully rolled back to protect the database." 
+            } 
+            catch { 
+                Write-Warning "[$env:SQL_DATABASE] Rollback failed. Check the database state immediately." 
             }
 
-            throw
+            throw "Execution failure on $env:SQL_DATABASE"
         }
         finally {
             $transaction.Dispose()
@@ -289,11 +318,24 @@ try {
     }
 }
 finally {
+    $connection.remove_InfoMessage($handler)
     $connection.Dispose()
 }
 '''
+                                }
                             }
+                        } catch (Exception e) {
+                            // If an error happens, this block catches it and allows the loop to continue
+                            echo "--------------------------------------------------------"
+                            echo "❌ ERROR ON ${db}. CONTINUING TO NEXT DATABASE..."
+                            echo "--------------------------------------------------------"
+                            hasErrors = true
                         }
+                    }
+
+                    // After all databases are checked, fail the pipeline if any of them had an error
+                    if (hasErrors) {
+                        error "Pipeline halted: One or more databases failed during execution. Review the logs above."
                     }
                 }
             }
