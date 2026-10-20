@@ -1,553 +1,299 @@
 
-import groovy.transform.Field
-
-@Field List<String> discoveredFilesList = []
-@Field List<String> selectedDatabases = []
-
-// ============================================================
-// ENVIRONMENT CONFIGURATION
-// ============================================================
-
-@Field Map<String, String> serverByEnvironment = [
-    TEST: 'WIN-U6S7JB4ANMN',
-    UAT : 'WIN-APTS20MHM62',
-    LIVE: '' // Enter the verified LIVE SQL Server name.
-]
-
-@Field Map<String, List<String>> databasesByEnvironment = [
+def environmentConfig = [
     TEST: [
-        'H_U_ASSIRAAT',
-        'H_U_Kaleem',
-        'H_U_NHMC'
+        server: 'WIN-U6S7JB4ANMN',
+        credentialId: 'sql-test-dbs-credentials',
+        databases: ['H_U_ASSIRAAT', 'H_U_Kaleem', 'H_U_NHMC']
     ],
     UAT: [
-        'pakred_uat'
+        server: 'WIN-APTS20MHM62',
+        credentialId: 'sql-uat-dbs-credentials',
+        databases: ['pakred_uat']
     ],
     LIVE: [
-        // Add the exact LIVE database names before using LIVE.
+        server: '',
+        credentialId: 'sql-live-dbs-credentials',
+        databases: []
     ]
 ]
 
-@Field Map<String, String> credentialsByEnvironment = [
-    TEST: 'sql-test-dbs-credentials',
-    UAT : 'sql-uat-dbs-credentials',
-    LIVE: 'sql-live-dbs-credentials'
-]
-
-@Field String migrationPattern =
-    '^V\\d{8}_\\d{3}__[a-zA-Z0-9_]+\\.sql$'
-
-// ============================================================
-// BASIC SQL SAFETY SCAN
-// This is a guardrail, not a security boundary.
-// ============================================================
-
-@NonCPS
-String removeSqlCommentsAndStrings(String sql) {
-    String text = sql.replaceAll(/(?s)\/\*.*?\*\//, ' ')
-    text = text.replaceAll(/(?m)--.*$/, ' ')
-    text = text.replaceAll(/'(?:''|[^'])*'/, "''")
-    text = text.replaceAll(/"(?:\"\"|[^"])*"/, '""')
-    return text
-}
-
-@NonCPS
-List<String> findUnsafeSql(String sql) {
-    String clean = removeSqlCommentsAndStrings(sql)
-
-    List<String> forbiddenPatterns = [
-        '(?i)\\bDROP\\s+(TABLE|DATABASE|PROCEDURE|VIEW|INDEX|SCHEMA)\\b',
-        '(?i)\\bTRUNCATE\\s+TABLE\\b',
-        '(?i)\\bDELETE\\s+(FROM\\s+)?',
-        '(?i)\\bALTER\\s+TABLE\\b[^;]*\\bDROP\\s+COLUMN\\b',
-        '(?i)\\b(GRANT|REVOKE|DENY)\\b'
-    ]
-
-    return forbiddenPatterns.findAll { pattern ->
-        clean =~ pattern
-    }
-}
-
-// ============================================================
-// PIPELINE
-// ============================================================
+def selectedDatabases = []
+def selectedMigration = ''
 
 pipeline {
-    agent none
+    agent {
+        label 'PAKRED_LIVE_SERVER'
+    }
 
     options {
         buildDiscarder(logRotator(numToKeepStr: '20'))
         disableConcurrentBuilds()
         timestamps()
-        skipDefaultCheckout(true)
-    }
-
-    parameters {
-        choice(
-            name: 'TARGET_ENV',
-            choices: ['TEST', 'UAT', 'LIVE'],
-            description: 'Choose TEST, UAT, or LIVE.'
-        )
-
-        choice(
-            name: 'EXECUTION_MODE',
-            choices: [
-                'DRY_RUN_ROLLBACK',
-                'COMMIT_CHANGES',
-                'HEALTH_CHECK_ONLY'
-            ],
-            description: 'Choose dry run, commit changes, or health check.'
-        )
     }
 
     stages {
-
-        // ----------------------------------------------------
-        // 1. Validate environment configuration
-        // ----------------------------------------------------
-
-        stage('Validate Configuration') {
-            agent {
-                label 'PAKRED_LIVE_SERVER'
-            }
-
-            steps {
-                script {
-                    String targetEnv = params.TARGET_ENV
-
-                    String targetServer =
-                        serverByEnvironment[targetEnv]
-
-                    List<String> configuredDatabases =
-                        databasesByEnvironment[targetEnv] ?: []
-
-                    String credentialId =
-                        credentialsByEnvironment[targetEnv]
-
-                    if (!targetServer?.trim()) {
-                        error(
-                            "The SQL Server for ${targetEnv} is not configured. " +
-                            'Update serverByEnvironment before running this environment.'
-                        )
-                    }
-
-                    if (configuredDatabases.isEmpty()) {
-                        error(
-                            "No databases are configured for ${targetEnv}. " +
-                            'Update databasesByEnvironment first.'
-                        )
-                    }
-
-                    if (!credentialId?.trim()) {
-                        error(
-                            "No Jenkins credential ID is configured for ${targetEnv}."
-                        )
-                    }
-
-                    echo "Environment: ${targetEnv}"
-                    echo "SQL Server: ${targetServer}"
-                    echo "Configured databases: ${configuredDatabases.join(', ')}"
-                    echo "Execution mode: ${params.EXECUTION_MODE}"
-                }
-            }
-        }
-
-        // ----------------------------------------------------
-        // 2. Checkout migration repository
-        // ----------------------------------------------------
-
         stage('Checkout Repository') {
-            agent {
-                label 'PAKRED_LIVE_SERVER'
-            }
-
             steps {
-                deleteDir()
+                checkout scm
+            }
+        }
 
-                git(
-                    url: 'https://github.com/UmerAzizGujjar/Hospital-DB-Migrations.git',
-                    branch: 'main',
-                    credentialsId: 'f2d6a7df-0fbc-46ae-a972-2aeb85e24bba'
-                )
-
+        stage('Validate Request') {
+            steps {
                 script {
-                    if (!fileExists('migrations')) {
-                        error('The migrations directory was not found.')
+                    def target = params.TARGET_ENV?.toString()
+                    def mode = params.EXECUTION_MODE?.toString()
+
+                    if (!environmentConfig.containsKey(target)) {
+                        error "Invalid environment: ${target}"
                     }
+
+                    if (!(mode in [
+                        'DRY_RUN_ROLLBACK',
+                        'COMMIT_CHANGES',
+                        'HEALTH_CHECK_ONLY'
+                    ])) {
+                        error "Invalid execution mode: ${mode}"
+                    }
+
+                    def config = environmentConfig[target]
+
+                    if (!config.server?.trim()) {
+                        error "LIVE is disabled until its SQL Server is configured."
+                    }
+
+                    selectedDatabases = (params.DATABASES ?: '')
+                        .toString()
+                        .split(/[,;\r\n]+/)
+                        .collect { it.trim() }
+                        .findAll { it }
+
+                    if (!selectedDatabases) {
+                        error 'Select at least one database.'
+                    }
+
+                    def invalidDatabases = selectedDatabases.findAll {
+                        !(it in config.databases)
+                    }
+
+                    if (invalidDatabases) {
+                        error "Database selection is invalid for ${target}: ${invalidDatabases}"
+                    }
+
+                    echo "Environment: ${target}"
+                    echo "SQL Server: ${config.server}"
+                    echo "Databases: ${selectedDatabases.join(', ')}"
+                    echo "Execution mode: ${mode}"
                 }
             }
         }
 
-        // ----------------------------------------------------
-        // 3. Discover and select migration file
-        // ----------------------------------------------------
-
-        stage('Select Migration File') {
-            agent {
-                label 'PAKRED_LIVE_SERVER'
+        stage('Select Migration') {
+            when {
+                expression {
+                    params.EXECUTION_MODE != 'HEALTH_CHECK_ONLY'
+                }
             }
 
             steps {
                 script {
-                    def files = findFiles(
-                        glob: 'migrations/*.sql'
-                    )
+                    def fileOutput = powershell(
+                        returnStdout: true,
+                        script: '''
+$files = Get-ChildItem -Path . -Recurse -File -Filter '*.sql' |
+    Where-Object {
+        $_.Name -match '^V\\d{8}_\\d{3}__[a-zA-Z0-9_]+\\.sql$' -and
+        $_.FullName -notmatch '[\\\\/]\\.git[\\\\/]'
+    } |
+    ForEach-Object {
+        $_.FullName.Substring((Get-Location).Path.Length + 1)
+    }
 
-                    discoveredFilesList = files
-                        .collect { it.name }
-                        .findAll { it ==~ migrationPattern }
-                        .sort()
+$files | Sort-Object
+'''
+                    ).trim()
 
-                    if (discoveredFilesList.isEmpty()) {
-                        error(
-                            'No migration files matched the required pattern: ' +
-                            'VYYYYMMDD_NNN__description.sql'
-                        )
+                    def migrationFiles = fileOutput
+                        ? fileOutput.readLines().findAll { it.trim() }
+                        : []
+
+                    if (!migrationFiles) {
+                        error 'No valid migration files were found.'
                     }
 
-                    echo 'Available migration files:'
-                    discoveredFilesList.each {
-                        echo " - ${it}"
-                    }
-
-                    def chosenFile = input(
-                        message: 'Select the SQL migration file.',
-                        ok: 'Continue',
+                    selectedMigration = input(
+                        message: 'Select the SQL migration to execute',
+                        ok: 'Select Migration',
                         parameters: [
                             choice(
                                 name: 'MIGRATION_FILE',
-                                choices: discoveredFilesList.join('\n'),
+                                choices: migrationFiles.join('\n'),
                                 description: 'Choose one migration file.'
                             )
                         ]
+                    ).toString()
+
+                    if (!(selectedMigration ==~ /(?s)(?!.*(?:^|[\\\\/])\\.\\.?(?:[\\\\/]|$)).*V\\d{8}_\\d{3}__[a-zA-Z0-9_]+\\.sql/)) {
+                        error 'Invalid migration file path.'
+                    }
+
+                    def sqlText = readFile(selectedMigration)
+
+                    // Guardrail: migration scripts must not switch databases.
+                    if (sqlText ==~ /(?s).*(?im)^\\s*USE\\s+.*$/) {
+                        error 'USE statements are not allowed. The connection selects the database.'
+                    }
+
+                    // Basic destructive-statement guardrail.
+                    if (sqlText ==~ /(?s).*(?im)^\\s*(DROP\\s+DATABASE|TRUNCATE\\s+TABLE|DELETE\\s+FROM|ALTER\\s+TABLE\\s+.*DROP\\s+COLUMN)\\b.*$/) {
+                        error 'Safety check blocked a potentially destructive SQL statement. Review the migration manually.'
+                    }
+
+                    echo "Selected migration: ${selectedMigration}"
+                }
+            }
+        }
+
+        stage('Approve Execution') {
+            steps {
+                script {
+                    def target = params.TARGET_ENV.toString()
+                    def mode = params.EXECUTION_MODE.toString()
+
+                    def summary = """
+Environment: ${target}
+Databases: ${selectedDatabases.join(', ')}
+Mode: ${mode}
+Migration: ${mode == 'HEALTH_CHECK_ONLY' ? 'Not applicable' : selectedMigration}
+
+Continue?
+"""
+
+                    input(
+                        message: summary,
+                        ok: 'Confirm Execution'
                     )
-
-                    env.SELECTED_MIGRATION_FILE =
-                        chosenFile.toString()
-
-                    if (!(env.SELECTED_MIGRATION_FILE ==~ migrationPattern)) {
-                        error('Invalid migration filename.')
-                    }
-
-                    if (!fileExists(
-                        "migrations/${env.SELECTED_MIGRATION_FILE}"
-                    )) {
-                        error('The selected migration file does not exist.')
-                    }
-
-                    echo "Selected migration: ${env.SELECTED_MIGRATION_FILE}"
                 }
             }
         }
 
-        // ----------------------------------------------------
-        // 4. SQL safety scan
-        // ----------------------------------------------------
-
-        stage('SQL Safety Scan') {
-            agent {
-                label 'PAKRED_LIVE_SERVER'
-            }
-
+        stage('Execute SQL') {
             steps {
                 script {
-                    String sql = readFile(
-                        "migrations/${env.SELECTED_MIGRATION_FILE}"
-                    )
+                    def target = params.TARGET_ENV.toString()
+                    def mode = params.EXECUTION_MODE.toString()
+                    def config = environmentConfig[target]
 
-                    List<String> matches = findUnsafeSql(sql)
-
-                    if (!matches.isEmpty()) {
-                        error(
-                            'The safety scan found a prohibited SQL pattern. ' +
-                            'Review the migration before proceeding.'
-                        )
-                    }
-
-                    echo 'Basic SQL safety scan passed.'
-                }
-            }
-        }
-
-        // ----------------------------------------------------
-        // 5. Select one or more databases
-        // ----------------------------------------------------
-
-        stage('Select Target Databases') {
-            agent {
-                label 'PAKRED_LIVE_SERVER'
-            }
-
-            steps {
-                script {
-                    List<String> candidates =
-                        databasesByEnvironment[params.TARGET_ENV] ?: []
-
-                    if (candidates.isEmpty()) {
-                        error('No databases are available for selection.')
-                    }
-
-                    def checkboxParams = candidates.withIndex().collect {
-                        dbName, index ->
-                            booleanParam(
-                                name: "DB_${index}",
-                                defaultValue: false,
-                                description: dbName
-                            )
-                    }
-
-                    def answers = input(
-                        message:
-                            "Select the database(s) for ${params.TARGET_ENV}.",
-                        ok: 'Continue',
-                        parameters: checkboxParams
-                    )
-
-                    selectedDatabases = []
-
-                    candidates.eachWithIndex { dbName, index ->
-                        String key = "DB_${index}"
-
-                        boolean selected = false
-
-                        if (answers instanceof Map) {
-                            selected =
-                                answers[key] == true ||
-                                answers[key]?.toString()
-                                    ?.equalsIgnoreCase('true')
-                        } else if (candidates.size() == 1) {
-                            selected =
-                                answers == true ||
-                                answers?.toString()
-                                    ?.equalsIgnoreCase('true')
-                        }
-
-                        if (selected) {
-                            selectedDatabases.add(dbName)
-                        }
-                    }
-
-                    if (selectedDatabases.isEmpty()) {
-                        error(
-                            'No databases were selected. Nothing was executed.'
-                        )
-                    }
-
-                    echo "Selected databases: ${selectedDatabases.join(', ')}"
-                }
-            }
-        }
-
-        // ----------------------------------------------------
-        // 6. Approval before sensitive execution
-        // ----------------------------------------------------
-
-        stage('Approve Migration') {
-            agent {
-                label 'PAKRED_LIVE_SERVER'
-            }
-
-            steps {
-                script {
-                    String summary = """
-Environment: ${params.TARGET_ENV}
-SQL Server: ${serverByEnvironment[params.TARGET_ENV]}
-Execution mode: ${params.EXECUTION_MODE}
-Migration file: ${env.SELECTED_MIGRATION_FILE}
-Target databases: ${selectedDatabases.join(', ')}
-""".trim()
-
-                    if (
-                        params.TARGET_ENV == 'LIVE' ||
-                        params.EXECUTION_MODE == 'COMMIT_CHANGES'
-                    ) {
-                        input(
-                            message: """Review the migration details carefully:
-
-${summary}
-
-Approve only if the target environment and databases are correct.""",
-                            ok: 'Approve Execution',
-                            submitterParameter: 'APPROVED_BY'
-                        )
-                    } else {
-                        echo summary
-                    }
-                }
-            }
-        }
-
-        // ----------------------------------------------------
-        // 7. Execute migration on each selected database
-        // ----------------------------------------------------
-
-        stage('Execute Migration') {
-            agent {
-                label 'PAKRED_LIVE_SERVER'
-            }
-
-            steps {
-                script {
-                    String targetServer =
-                        serverByEnvironment[params.TARGET_ENV]
-
-                    String credentialId =
-                        credentialsByEnvironment[params.TARGET_ENV]
-
-                    for (String dbName : selectedDatabases) {
-
-                        echo "Processing database: ${dbName}"
+                    for (String db in selectedDatabases) {
+                        echo "Processing database: ${db}"
 
                         withCredentials([
                             usernamePassword(
-                                credentialsId: credentialId,
-                                usernameVariable: 'DB_USER',
-                                passwordVariable: 'DB_PASS'
+                                credentialsId: config.credentialId,
+                                usernameVariable: 'SQL_USER',
+                                passwordVariable: 'SQL_PASSWORD'
                             )
                         ]) {
                             withEnv([
-                                "TARGET_DATABASE=${dbName}",
-                                "DB_SERVER=${targetServer}",
-                                "RUN_MODE=${params.EXECUTION_MODE}",
-                                "SQL_FILE_PATH=${pwd()}\\migrations\\${env.SELECTED_MIGRATION_FILE}"
+                                "SQL_SERVER=${config.server}",
+                                "SQL_DATABASE=${db}",
+                                "SQL_EXECUTION_MODE=${mode}",
+                                "SQL_MIGRATION_FILE=${selectedMigration}"
                             ]) {
-                                powershell(
-                                    label:
-                                        "SQL ${params.EXECUTION_MODE}: ${dbName}",
-                                    script: '''
+                                powershell '''
 $ErrorActionPreference = 'Stop'
 
-# Build the connection string safely, including passwords
-# that contain semicolons or other special characters.
-$builder = New-Object System.Data.SqlClient.SqlConnectionStringBuilder
-$builder['Data Source'] = $env:DB_SERVER
-$builder['Initial Catalog'] = $env:TARGET_DATABASE
-$builder['User ID'] = $env:DB_USER
-$builder['Password'] = $env:DB_PASS
-$builder['Encrypt'] = $true
-$builder['TrustServerCertificate'] = $true
-$builder['Connect Timeout'] = 15
+$connectionString = @(
+    "Server=$env:SQL_SERVER"
+    "Initial Catalog=$env:SQL_DATABASE"
+    "User ID=$env:SQL_USER"
+    "Password=$env:SQL_PASSWORD"
+    "Encrypt=True"
+    "TrustServerCertificate=True"
+    "Connect Timeout=15"
+) -join ';'
 
 $connection = New-Object System.Data.SqlClient.SqlConnection(
-    $builder.ConnectionString
+    $connectionString
 )
-
-$transaction = $null
 
 try {
     $connection.Open()
+    Write-Output "Connected to $env:SQL_SERVER / $env:SQL_DATABASE"
 
-    # Health check: connect and verify SQL execution only.
-    if ($env:RUN_MODE -eq 'HEALTH_CHECK_ONLY') {
+    if ($env:SQL_EXECUTION_MODE -eq 'HEALTH_CHECK_ONLY') {
         $command = $connection.CreateCommand()
+        $command.CommandText = 'SELECT 1'
+        $result = $command.ExecuteScalar()
+        $command.Dispose()
 
-        try {
-            $command.CommandText = 'SELECT 1'
-            $command.CommandTimeout = 15
-            $null = $command.ExecuteScalar()
-        }
-        finally {
-            $command.Dispose()
+        if ($result -ne 1) {
+            throw 'Health check failed.'
         }
 
-        Write-Output "Health check passed for $($env:TARGET_DATABASE)."
-        exit 0
-    }
-
-    $sqlPath = $env:SQL_FILE_PATH
-
-    if (-not (Test-Path -LiteralPath $sqlPath)) {
-        throw 'The migration file was not found.'
-    }
-
-    $sqlText = Get-Content -LiteralPath $sqlPath -Raw
-
-    if ([string]::IsNullOrWhiteSpace($sqlText)) {
-        throw 'The migration file is empty.'
-    }
-
-    if (
-        $env:RUN_MODE -ne 'DRY_RUN_ROLLBACK' -and
-        $env:RUN_MODE -ne 'COMMIT_CHANGES'
-    ) {
-        throw 'Unsupported execution mode.'
-    }
-
-    $transaction = $connection.BeginTransaction()
-
-    # Split SQL Server batches separated by GO on a line.
-    $batches = [regex]::Split(
-        $sqlText,
-        '(?im)^\s*GO\s*(?:--.*)?$'
-    )
-
-    foreach ($batch in $batches) {
-        if ([string]::IsNullOrWhiteSpace($batch)) {
-            continue
-        }
-
-        $command = $connection.CreateCommand()
-        $command.Transaction = $transaction
-        $command.CommandTimeout = 120
-        $command.CommandText = $batch
-
-        try {
-            $null = $command.ExecuteNonQuery()
-        }
-        finally {
-            $command.Dispose()
-        }
-    }
-
-    if ($env:RUN_MODE -eq 'DRY_RUN_ROLLBACK') {
-        $transaction.Rollback()
-
-        Write-Output (
-            "Dry run completed and transaction rolled back for " +
-            "$($env:TARGET_DATABASE)."
-        )
+        Write-Output 'Health check successful.'
     }
     else {
-        $transaction.Commit()
+        $sql = Get-Content -LiteralPath $env:SQL_MIGRATION_FILE -Raw
 
-        Write-Output (
-            "Migration committed successfully for " +
-            "$($env:TARGET_DATABASE)."
+        # Split SQL Server batches separated by GO.
+        $batches = [regex]::Split(
+            $sql,
+            '(?im)^\\s*GO\\s*(?:--.*)?$'
         )
-    }
-}
-catch {
-    if ($null -ne $transaction) {
+
+        $transaction = $connection.BeginTransaction()
+
         try {
-            if ($transaction.Connection -ne $null) {
+            foreach ($batch in $batches) {
+                if ([string]::IsNullOrWhiteSpace($batch)) {
+                    continue
+                }
+
+                $command = $connection.CreateCommand()
+                $command.Transaction = $transaction
+                $command.CommandTimeout = 120
+                $command.CommandText = $batch
+
+                try {
+                    [void]$command.ExecuteNonQuery()
+                }
+                finally {
+                    $command.Dispose()
+                }
+            }
+
+            if ($env:SQL_EXECUTION_MODE -eq 'DRY_RUN_ROLLBACK') {
                 $transaction.Rollback()
+                Write-Output 'Dry run completed; transaction rolled back.'
+            }
+            elseif ($env:SQL_EXECUTION_MODE -eq 'COMMIT_CHANGES') {
+                $transaction.Commit()
+                Write-Output 'Migration committed successfully.'
+            }
+            else {
+                throw 'Unsupported execution mode.'
             }
         }
         catch {
-            Write-Warning 'Rollback could not be completed.'
+            try {
+                $transaction.Rollback()
+            }
+            catch {
+                Write-Warning 'Rollback failed. Check the database state immediately.'
+            }
+
+            throw
+        }
+        finally {
+            $transaction.Dispose()
         }
     }
-
-    Write-Error (
-        "Migration failed for $($env:TARGET_DATABASE). " +
-        "Review the SQL Server and Jenkins logs."
-    )
-
-    throw
 }
 finally {
-    if ($null -ne $transaction) {
-        $transaction.Dispose()
-    }
-
-    if ($connection.State -ne 'Closed') {
-        $connection.Close()
-    }
-
     $connection.Dispose()
 }
 '''
-                                )
                             }
                         }
                     }
@@ -558,15 +304,15 @@ finally {
 
     post {
         success {
-            echo 'Jenkins pipeline completed successfully.'
+            echo 'Pipeline completed successfully.'
         }
 
         failure {
-            echo 'Pipeline failed. Review the logs before retrying.'
+            echo 'Pipeline failed. Review the console output and database state.'
         }
 
         always {
-            echo 'Pipeline execution finished.'
+            echo 'Hospital database migration pipeline finished.'
         }
     }
 }
