@@ -30,8 +30,44 @@ pipeline {
         timestamps()
     }
 
-    // Notice the parameters block is completely gone. 
-    // We will build it in the UI instead.
+    parameters {
+        choice(
+            name: 'TARGET_ENV',
+            choices: ['TEST', 'UAT', 'LIVE'],
+            description: 'Select the target database environment'
+        )
+        choice(
+            name: 'EXECUTION_MODE',
+            choices: ['DRY_RUN_ROLLBACK', 'COMMIT_CHANGES', 'HEALTH_CHECK_ONLY'],
+            description: 'Select how the SQL should be executed'
+        )
+        parameter([
+            $class: 'CascadeChoiceParameter',
+            name: 'DATABASES',
+            choiceType: 'PT_CHECKBOX',
+            description: 'Databases dynamically populate based on the selected TARGET_ENV',
+            referencedParameters: 'TARGET_ENV',
+            script: [
+                $class: 'GroovyScript',
+                script: [
+                    sandbox: true,
+                    script: '''
+                        if (TARGET_ENV == 'TEST') {
+                            return ['H_U_ASSIRAAT:selected', 'H_U_Kaleem:selected', 'H_U_NHMC:selected']
+                        } else if (TARGET_ENV == 'UAT') {
+                            return ['pakred_uat:selected']
+                        } else {
+                            return ['No_Databases_Configured']
+                        }
+                    '''
+                ],
+                fallbackScript: [
+                    sandbox: true,
+                    script: 'return ["Script Error"]'
+                ]
+            ]
+        ])
+    }
 
     stages {
         stage('Checkout Repository') {
