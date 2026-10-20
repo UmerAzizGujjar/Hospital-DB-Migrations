@@ -102,7 +102,7 @@ pipeline {
                     def fileOutput = powershell(
                         returnStdout: true,
                         script: '''
-$files = Get-ChildItem -Path .\\mig5rations -Recurse -File -Filter '*.sql' -ErrorAction SilentlyContinue |
+$files = Get-ChildItem -Path .\\migrations -Recurse -File -Filter '*.sql' -ErrorAction SilentlyContinue |
     Where-Object {
         $_.Name -match '^V\\d{8}_\\d{3}__[a-zA-Z0-9_]+\\.sql$' -and
         $_.FullName -notmatch '[\\\\/]\\.git[\\\\/]'
@@ -120,7 +120,7 @@ $files | Sort-Object
                         : []
 
                     if (!migrationFiles) {
-                        error 'No valid migration files were found in the mig5rations folder.'
+                        error 'No valid migration files were found in the migrations folder.'
                     }
 
                     selectedMigration = input(
@@ -130,7 +130,7 @@ $files | Sort-Object
                             choice(
                                 name: 'MIGRATION_FILE',
                                 choices: migrationFiles.join('\n'),
-                                description: 'Choose one migration file from the mig5rations folder.'
+                                description: 'Choose one migration file from the migrations folder.'
                             )
                         ]
                     ).toString()
