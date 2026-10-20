@@ -1,0 +1,1 @@
+DELETE FROM Patients WHERE PatientID = 9999;
