@@ -30,42 +30,7 @@ pipeline {
         timestamps()
     }
 
-    parameters {
-        choice(
-            name: 'TARGET_ENV',
-            choices: ['TEST', 'UAT', 'LIVE'],
-            description: 'Select the target database environment'
-        )
-        choice(
-            name: 'EXECUTION_MODE',
-            choices: ['DRY_RUN_ROLLBACK', 'COMMIT_CHANGES', 'HEALTH_CHECK_ONLY'],
-            description: 'Select how the SQL should be executed'
-        )
-        reactiveChoice(
-            name: 'DATABASES',
-            choiceType: 'PT_CHECKBOX',
-            description: 'Databases dynamically populate based on the selected TARGET_ENV',
-            referencedParameters: 'TARGET_ENV',
-            script: groovyScript(
-                script: secureGroovyScript(
-                    script: '''
-                        if (TARGET_ENV == 'TEST') {
-                            return ['H_U_ASSIRAAT:selected', 'H_U_Kaleem:selected', 'H_U_NHMC:selected']
-                        } else if (TARGET_ENV == 'UAT') {
-                            return ['pakred_uat:selected']
-                        } else {
-                            return ['No_Databases_Configured']
-                        }
-                    ''',
-                    sandbox: true
-                ),
-                fallbackScript: secureGroovyScript(
-                    script: 'return ["Script Error"]',
-                    sandbox: true
-                )
-            )
-        )
-    }
+    // The parameters block has been completely removed so it stops overwriting the UI
 
     stages {
         stage('Checkout Repository') {
