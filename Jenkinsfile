@@ -1,4 +1,3 @@
-
 def environmentConfig = [
     TEST: [
         server: 'WIN-U6S7JB4ANMN',
@@ -22,7 +21,9 @@ def selectedMigration = ''
 
 pipeline {
     agent {
-        label 'PAKRED_LIVE_SERVER'
+        // Updated to use the built-in node (the Jenkins server itself)
+        // Note: If you are on an older Jenkins version, change 'built-in' to 'master'
+        label 'built-in'
     }
 
     options {
@@ -100,7 +101,8 @@ pipeline {
                     def fileOutput = powershell(
                         returnStdout: true,
                         script: '''
-$files = Get-ChildItem -Path . -Recurse -File -Filter '*.sql' |
+# Updated to look specifically inside the 'migration' folder
+$files = Get-ChildItem -Path .\\migration -Recurse -File -Filter '*.sql' -ErrorAction SilentlyContinue |
     Where-Object {
         $_.Name -match '^V\\d{8}_\\d{3}__[a-zA-Z0-9_]+\\.sql$' -and
         $_.FullName -notmatch '[\\\\/]\\.git[\\\\/]'
@@ -118,7 +120,7 @@ $files | Sort-Object
                         : []
 
                     if (!migrationFiles) {
-                        error 'No valid migration files were found.'
+                        error 'No valid migration files were found in the migration folder.'
                     }
 
                     selectedMigration = input(
@@ -128,24 +130,23 @@ $files | Sort-Object
                             choice(
                                 name: 'MIGRATION_FILE',
                                 choices: migrationFiles.join('\n'),
-                                description: 'Choose one migration file.'
+                                description: 'Choose one migration file from the migration folder.'
                             )
                         ]
                     ).toString()
 
-                    if (!(selectedMigration ==~ /(?s)(?!.*(?:^|[\\\\/])\\.\\.?(?:[\\\\/]|$)).*V\\d{8}_\\d{3}__[a-zA-Z0-9_]+\\.sql/)) {
+                    if (!(selectedMigration ==~ /(?s)(?!.*(?:^|[\\\/])\.\.?(?:[\\\/]|$)).*V\d{8}_\d{3}__[a-zA-Z0-9_]+\.sql/)) {
                         error 'Invalid migration file path.'
                     }
 
                     def sqlText = readFile(selectedMigration)
 
-                    // Guardrail: migration scripts must not switch databases.
-                    if (sqlText ==~ /(?s).*(?im)^\\s*USE\\s+.*$/) {
-                        error 'USE statements are not allowed. The connection selects the database.'
+                    // Guardrail: ensures the user doesn't put "USE DatabaseName" in the script
+                    if (sqlText ==~ /(?s).*(?im)^\s*USE\s+.*$/) {
+                        error 'USE statements are not allowed in the script. The pipeline automatically routes to the selected databases.'
                     }
 
-                    // Basic destructive-statement guardrail.
-                    if (sqlText ==~ /(?s).*(?im)^\\s*(DROP\\s+DATABASE|TRUNCATE\\s+TABLE|DELETE\\s+FROM|ALTER\\s+TABLE\\s+.*DROP\\s+COLUMN)\\b.*$/) {
+                    if (sqlText ==~ /(?s).*(?im)^\s*(DROP\s+DATABASE|TRUNCATE\s+TABLE|DELETE\s+FROM|ALTER\s+TABLE\s+.*DROP\s+COLUMN)\b.*$/) {
                         error 'Safety check blocked a potentially destructive SQL statement. Review the migration manually.'
                     }
 
@@ -184,6 +185,7 @@ Continue?
                     def mode = params.EXECUTION_MODE.toString()
                     def config = environmentConfig[target]
 
+                    // This loop automatically executes the chosen script against EVERY database selected in the UI parameters
                     for (String db in selectedDatabases) {
                         echo "Processing database: ${db}"
 
@@ -203,6 +205,7 @@ Continue?
                                 powershell '''
 $ErrorActionPreference = 'Stop'
 
+# Initial Catalog handles the database targeting automatically
 $connectionString = @(
     "Server=$env:SQL_SERVER"
     "Initial Catalog=$env:SQL_DATABASE"
@@ -236,7 +239,6 @@ try {
     else {
         $sql = Get-Content -LiteralPath $env:SQL_MIGRATION_FILE -Raw
 
-        # Split SQL Server batches separated by GO.
         $batches = [regex]::Split(
             $sql,
             '(?im)^\\s*GO\\s*(?:--.*)?$'
@@ -306,11 +308,9 @@ finally {
         success {
             echo 'Pipeline completed successfully.'
         }
-
         failure {
             echo 'Pipeline failed. Review the console output and database state.'
         }
-
         always {
             echo 'Hospital database migration pipeline finished.'
         }
