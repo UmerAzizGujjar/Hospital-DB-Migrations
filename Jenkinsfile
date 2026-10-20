@@ -104,28 +104,20 @@ pipeline {
 $now = (Get-Date).Date
 $files = Get-ChildItem -Path .\\migrations -Recurse -File -Filter '*.sql' -ErrorAction SilentlyContinue |
     Where-Object {
-        $_.Name -match '^V\\d{8}_\\d{3}__[a-zA-Z0-9_]+\\.sql$' -and
         $_.FullName -notmatch '[\\\\/]\\.git[\\\\/]'
     } |
-    Sort-Object -Property Name -Descending
+    Sort-Object -Property LastWriteTime -Descending
 
 $outputList = @()
 foreach ($f in $files) {
     $relPath = $f.FullName.Substring((Get-Location).Path.Length + 1)
-    $timeStr = "Unknown"
+    $fileDate = $f.LastWriteTime.Date
+    $days = ($now - $fileDate).Days
     
-    if ($f.Name -match '^V(\\d{4})(\\d{2})(\\d{2})') {
-        try {
-            $fileDate = [datetime]::new([int]$Matches[1], [int]$Matches[2], [int]$Matches[3])
-            $days = ($now - $fileDate).Days
-            if ($days -lt 0) { $timeStr = "Future date" }
-            elseif ($days -eq 0) { $timeStr = "Added today" }
-            elseif ($days -eq 1) { $timeStr = "Added 1 day ago" }
-            else { $timeStr = "Added $days days ago" }
-        } catch {
-            $timeStr = "Invalid date"
-        }
-    }
+    if ($days -lt 0) { $timeStr = "Future date" }
+    elseif ($days -eq 0) { $timeStr = "Modified today" }
+    elseif ($days -eq 1) { $timeStr = "Modified 1 day ago" }
+    else { $timeStr = "Modified $days days ago" }
     
     $outputList += "$relPath | $timeStr"
 }
@@ -149,7 +141,7 @@ $outputList
                             choice(
                                 name: 'MIGRATION_FILE',
                                 choices: migrationFiles.join('\n'),
-                                description: 'Files are sorted newest first.'
+                                description: 'Files are sorted newest first based on modified date.'
                             )
                         ]
                     ).toString()
@@ -157,8 +149,8 @@ $outputList
                     // Extract exact file path by removing the appended time string
                     selectedMigration = rawSelection.tokenize('|')[0].trim()
 
-                    if (!(selectedMigration ==~ /(?s)(?!.*(?:^|[\\\/])\.\.?(?:[\\\/]|$)).*V\d{8}_\d{3}__[a-zA-Z0-9_]+\.sql/)) {
-                        error 'Invalid migration file path.'
+                    if (!(selectedMigration ==~ /(?s)(?!.*(?:^|[\\\/])\.\.?(?:[\\\/]|$)).*\.sql/)) {
+                        error 'Invalid migration file path. Must be a .sql file.'
                     }
 
                     def sqlText = readFile(selectedMigration)
