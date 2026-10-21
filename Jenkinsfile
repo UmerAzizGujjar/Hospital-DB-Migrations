@@ -101,7 +101,7 @@ foreach ($f in$files) {
     elseif ($days -eq 1) {$timeStr = "Modified 1 day ago" }
     else { $timeStr = "Modified $days days ago" }
     
-    $outputList += "$relPath \vert{}$timeStr"
+    $outputList += "$relPath \ $timeStr"
 }
 $outputList
 '''
@@ -304,7 +304,7 @@ if (!(Test-Path '.\\migrations')) { New-Item -ItemType Directory -Path '.\\migra
 
 # Intercept and clean the hidden Active Choices escape characters before saving to GitHub
 $cleanSql =$env:SQL_CUSTOM_TEXT -replace '\\\\n', "`n" -replace '\\\\r', "`r"
-$cleanSql \vert{} Out-File -FilePath$filePath -Encoding UTF8
+$cleanSql \ Out-File -FilePath$filePath -Encoding UTF8
 Write-Output "Created migration file: $fileName"
 
 git config user.name "Jenkins Automation"
