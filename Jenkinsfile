@@ -323,7 +323,12 @@ git config user.email "jenkins@automation.local"
 $remoteUrl = git remote get-url origin
 if ($remoteUrl -match 'https://github.com/(.*)') {
     $repoPath = $Matches[1]
-    git remote set-url origin "https://$env:GIT_USER:$env:GIT_PASS@github.com/$repoPath"
+    
+    # Safely encode the username and password to prevent special characters (like @) from breaking the URL
+    $encUser = [uri]::EscapeDataString($env:GIT_USER)
+    $encPass = [uri]::EscapeDataString($env:GIT_PASS)
+    
+    git remote set-url origin "https://${encUser}:${encPass}@github.com/$repoPath"
 }
 
 git add $filePath
