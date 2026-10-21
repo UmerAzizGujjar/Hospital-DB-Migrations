@@ -328,7 +328,14 @@ if ($remoteUrl -match 'https://github.com/(.*)') {
 
 git add $filePath
 git commit -m "Auto-commit custom query from Jenkins UI: $fileName"
-git push origin main
+
+# Push the current detached HEAD directly to the remote main branch
+git push origin HEAD:main
+
+if ($LASTEXITCODE -ne 0) {
+    throw "Failed to push the commit to GitHub. Check Git credentials and permissions."
+}
+
 Write-Output "Successfully pushed new migration file to GitHub!"
 '''
                         }
