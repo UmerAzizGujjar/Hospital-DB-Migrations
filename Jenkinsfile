@@ -78,7 +78,6 @@ pipeline {
 
         stage('Select Migration') {
             when {
-                // Skip if they selected Yes for a custom UI query
                 expression { !(params.USE_CUSTOM_QUERY?.toString() == 'Yes') }
             }
             steps {
@@ -280,16 +279,13 @@ finally {
 
         stage('Auto-Commit to GitHub') {
             when {
-                // Only trigger if they ran a custom text box query
                 expression { params.USE_CUSTOM_QUERY?.toString() == 'Yes' }
             }
             steps {
                 script {
-                    def target = params.TARGET_ENV.toString()
-                    def config = environmentConfig[target]
-                    
+                    // Using your existing GitHub PAT credential ID
                     withCredentials([
-                        usernamePassword(credentialsId: config.credentialId, usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PASS')
+                        usernamePassword(credentialsId: 'f2d6a7df-0fbc-46ae-a972-2aeb85e24bba', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PASS')
                     ]) {
                         withEnv([
                             "CUSTOM_FILE_NAME=${params.CUSTOM_FILE_NAME ?: ''}",
@@ -299,12 +295,10 @@ finally {
 $ErrorActionPreference = 'Stop'
 $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
 
-# Read the custom name from UI, default to UI_CustomQuery if blank
 $baseName = $env:CUSTOM_FILE_NAME
 if ([string]::IsNullOrWhiteSpace($baseName)) {
     $baseName = "UI_CustomQuery"
 } else {
-    # Remove .sql if the user typed it, and replace spaces with underscores to keep it clean
     $baseName = $baseName -replace '\\.sql$', ''
     $baseName = $baseName -replace '[^a-zA-Z0-9_]', '_'
 }
@@ -324,7 +318,6 @@ $remoteUrl = git remote get-url origin
 if ($remoteUrl -match 'https://github.com/(.*)') {
     $repoPath = $Matches[1]
     
-    # Safely encode the username and password to prevent special characters (like @) from breaking the URL
     $encUser = [uri]::EscapeDataString($env:GIT_USER)
     $encPass = [uri]::EscapeDataString($env:GIT_PASS)
     
@@ -334,7 +327,6 @@ if ($remoteUrl -match 'https://github.com/(.*)') {
 git add $filePath
 git commit -m "Auto-commit custom query from Jenkins UI: $fileName"
 
-# Push the current detached HEAD directly to the remote main branch
 git push origin HEAD:main
 
 if ($LASTEXITCODE -ne 0) {
