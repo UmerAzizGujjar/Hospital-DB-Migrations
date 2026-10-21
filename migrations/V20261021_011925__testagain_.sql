@@ -1,0 +1,6 @@
+﻿CREATE OR ALTER PROCEDURE GetAllPatients
+AS
+BEGIN
+    SELECT * FROM patients;
+END;
+GO,
