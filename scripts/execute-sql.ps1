@@ -18,11 +18,28 @@ try {
     if ($env:USE_CUSTOM_QUERY -eq 'true') {
         # Active Choices may inject literal \n / \r text; convert back to real line breaks
         $sql = $env:SQL_CUSTOM_TEXT -replace '\\n', "`n" -replace '\\r', "`r"
+        # Also drop a stray backslash sitting right before a real line break
+        $sql = $sql -replace '\\(?=\r?\n)', ''
     } else {
         $sql = Get-Content -LiteralPath $env:SQL_MIGRATION_FILE -Raw
     }
 
-    $batches = [regex]::Split($sql, '(?im)^\s*GO\s*(?:--.*)?$')
+    # Normalise every kind of line ending to LF, then split on GO line by line
+    $sql = $sql -replace "`r`n", "`n" -replace "`r", "`n"
+
+    $batches = @()
+    $current = New-Object System.Text.StringBuilder
+    foreach ($line in $sql.Split("`n")) {
+        if ($line -match '^\s*GO\s*(--.*)?$') {
+            $batches += $current.ToString()
+            [void]$current.Clear()
+        } else {
+            [void]$current.AppendLine($line)
+        }
+    }
+    $batches += $current.ToString()
+
+    Write-Output "[$env:SQL_DATABASE] Parsed $($batches.Count) batch(es)."
     $transaction = $connection.BeginTransaction()
 
     try {
@@ -52,6 +69,11 @@ try {
         Write-Output ' '
         Write-Output "[$env:SQL_DATABASE] !!! SQL ERROR !!!"
         Write-Output "[$env:SQL_DATABASE] Error Details: $($_.Exception.Message)"
+        if ($batch) {
+            $preview = ($batch -replace "`r", '<CR>' -replace "`n", '<LF>')
+            if ($preview.Length -gt 400) { $preview = $preview.Substring(0, 400) }
+            Write-Output "[$env:SQL_DATABASE] Failing batch (first 400 chars): $preview"
+        }
         Write-Output ' '
         try {
             $transaction.Rollback()
