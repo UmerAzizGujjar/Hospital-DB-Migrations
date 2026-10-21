@@ -30,7 +30,7 @@ try {
     $batches = @()
     $current = New-Object System.Text.StringBuilder
     foreach ($line in $sql.Split("`n")) {
-        if ($line -match '^\s*GO\s*(--.*)?$') {
+        if ($line -match '^\s*GO\s*[,;]?\s*(--.*)?$') {
             $batches += $current.ToString()
             [void]$current.Clear()
         } else {
