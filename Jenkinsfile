@@ -84,27 +84,7 @@ pipeline {
                 script {
                     def fileOutput = powershell(
                         returnStdout: true,
-                        script: '''
-$now = (Get-Date).Date
-$files = Get-ChildItem -Path .\\migrations -Recurse -File -Filter '*.sql' -ErrorAction SilentlyContinue |
-    Where-Object { $_.FullName -notmatch '[\\\\/]\\.git[\\\\/]' } |
-    Sort-Object -Property LastWriteTime -Descending
-
-$outputList = @()
-foreach ($f in$files) {
-    $relPath =$f.FullName.Substring((Get-Location).Path.Length + 1)
-    $fileDate =$f.LastWriteTime.Date
-    $days = ($now -$fileDate).Days
-    
-    if ($days -lt 0) {$timeStr = "Future date" }
-    elseif ($days -eq 0) {$timeStr = "Modified today" }
-    elseif ($days -eq 1) {$timeStr = "Modified 1 day ago" }
-    else { $timeStr = "Modified $days days ago" }
-    
-    $outputList += "$relPath ::$timeStr"
-}
-$outputList
-'''
+                        script: './scripts/list-migrations.ps1'
                     ).trim()
 
                     def migrationFiles = fileOutput ? fileOutput.readLines().findAll { it.trim() } : []
@@ -149,13 +129,13 @@ $outputList
                 script {
                     def target = params.TARGET_ENV.toString()
                     def useCustom = params.USE_CUSTOM_QUERY?.toString() == 'Yes'
-                    
+
                     def fileNamePreview = "V[Timestamp]__UI_CustomQuery.sql"
                     if (useCustom && params.CUSTOM_FILE_NAME?.trim()) {
                         def cleanName = params.CUSTOM_FILE_NAME.trim().replaceAll(/\.sql$/, '').replaceAll(/[^a-zA-Z0-9_]/, '_')
                         fileNamePreview = "V[Timestamp]__${cleanName}.sql"
                     }
-                    
+
                     def migrationLabel = useCustom ? "Direct UI Text Box Query (Saving as: ${fileNamePreview})" : selectedMigration
 
                     def summary = """
@@ -177,7 +157,7 @@ Continue?
                     def target = params.TARGET_ENV.toString()
                     def useCustom = params.USE_CUSTOM_QUERY?.toString() == 'Yes'
                     def config = environmentConfig[target]
-                    def hasErrors = false 
+                    def hasErrors = false
 
                     for (String db in selectedDatabases) {
                         try {
@@ -191,77 +171,12 @@ Continue?
                                     "USE_CUSTOM_QUERY=${useCustom}",
                                     "SQL_CUSTOM_TEXT=${params.CUSTOM_SQL_TEXT ?: ''}"
                                 ]) {
-                                    powershell '''
-$ErrorActionPreference = 'Stop'$connectionString = "Server=$env:SQL_SERVER;Initial Catalog=$env:SQL_DATABASE;User ID=$env:SQL_USER;Password=$env:SQL_PASSWORD;Encrypt=True;TrustServerCertificate=True;Connect Timeout=15"
-$connection = New-Object System.Data.SqlClient.SqlConnection($connectionString)
-
-$handler = [System.Data.SqlClient.SqlInfoMessageEventHandler] {
-    param($sender,$eventArgs)
-    Write-Output "[$env:SQL_DATABASE] SQL MESSAGE: $($eventArgs.Message)"
-}
-$connection.add_InfoMessage($handler)
-
-try {
-    $connection.Open()
-    Write-Output "--------------------------------------------------------"
-    Write-Output "EXECUTING ON DATABASE: $env:SQL_DATABASE"
-    Write-Output "--------------------------------------------------------"
-
-    if ($env:USE_CUSTOM_QUERY -eq 'true') {
-        # Intercept and clean the hidden Active Choices escape characters
-        $sql =$env:SQL_CUSTOM_TEXT -replace '\\\\n', "`n" -replace '\\\\r', "`r"
-    } else {
-        $sql = Get-Content -LiteralPath$env:SQL_MIGRATION_FILE -Raw
-    }
-
-    $batches = [regex]::Split($sql, '(?im)^\\s*GO\\s*(?:--.*)?$')
-    $transaction =$connection.BeginTransaction()
-
-    try {
-        foreach ($batch in$batches) {
-            if ([string]::IsNullOrWhiteSpace($batch)) { continue }
-
-            $command = $connection.CreateCommand()$command.Transaction = $transaction$command.CommandTimeout = 120
-            $command.CommandText =$batch
-
-            try {
-                $rowsAffected =$command.ExecuteNonQuery()
-                if ($rowsAffected -ge 0) {
-                    Write-Output "[$env:SQL_DATABASE] ($rowsAffected row(s) affected)"
-                } else {
-                    Write-Output "[$env:SQL_DATABASE] Command completed successfully."
-                }
-            }
-            finally { $command.Dispose() }
-        }
-        
-        $transaction.Commit()
-        Write-Output "[$env:SQL_DATABASE] >> Migration committed successfully."
-    }
-    catch {
-        Write-Output " "
-        Write-Output "[$env:SQL_DATABASE] !!! SQL ERROR !!!"
-        Write-Output "[$env:SQL_DATABASE] Error Details: $($_.Exception.Message)"
-        Write-Output " "
-        try { 
-            $transaction.Rollback()
-            Write-Output "[$env:SQL_DATABASE] >> Transaction successfully rolled back to protect the database." 
-        } catch { 
-            Write-Warning "[$env:SQL_DATABASE] Rollback failed. Check the database state immediately." 
-        }
-        throw "Execution failure on $env:SQL_DATABASE"
-    }
-    finally { $transaction.Dispose() }
-}
-finally {
-    $connection.remove_InfoMessage($handler)$connection.Dispose()
-}
-'''
+                                    powershell './scripts/execute-sql.ps1'
                                 }
                             }
                         } catch (Exception e) {
                             echo "--------------------------------------------------------"
-                            echo "❌ ERROR ON ${db}. CONTINUING TO NEXT DATABASE..."
+                            echo "ERROR ON ${db}. CONTINUING TO NEXT DATABASE..."
                             echo "--------------------------------------------------------"
                             hasErrors = true
                         }
@@ -287,53 +202,7 @@ finally {
                             "CUSTOM_FILE_NAME=${params.CUSTOM_FILE_NAME ?: ''}",
                             "SQL_CUSTOM_TEXT=${params.CUSTOM_SQL_TEXT ?: ''}"
                         ]) {
-                            powershell '''
-$ErrorActionPreference = 'Stop'$timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-
-$baseName =$env:CUSTOM_FILE_NAME
-if ([string]::IsNullOrWhiteSpace($baseName)) {$baseName = "UI_CustomQuery"
-} else {
-    $baseName = $baseName -replace '\\.sql$', ''
-    $baseName =$baseName -replace '[^a-zA-Z0-9_]', '_'
-}
-
-$fileName = "V${timestamp}__${baseName}.sql"
-$filePath = ".\\migrations\\$fileName"
-
-if (!(Test-Path '.\\migrations')) { New-Item -ItemType Directory -Path '.\\migrations' }
-
-# Intercept and clean the hidden Active Choices escape characters before saving to GitHub
-$cleanSql =$env:SQL_CUSTOM_TEXT -replace '\\\\n', "`n" -replace '\\\\r', "`r"
-
-# Using InputObject bypasses the pipe symbol completely
-Out-File -InputObject $cleanSql -FilePath$filePath -Encoding UTF8
-
-Write-Output "Created migration file: $fileName"
-
-git config user.name "Jenkins Automation"
-git config user.email "jenkins@automation.local"
-
-$remoteUrl = git remote get-url origin
-if ($remoteUrl -match 'https://github.com/(.*)') {
-    $repoPath =$Matches[1]
-    
-    $encUser = [uri]::EscapeDataString($env:GIT_USER)
-    $encPass = [uri]::EscapeDataString($env:GIT_PASS)
-    
-    git remote set-url origin "https://${encUser}:${encPass}@github.com/$repoPath"
-}
-
-git add $filePath
-git commit -m "Auto-commit custom query from Jenkins UI: $fileName"
-
-git push origin HEAD:main
-
-if ($LASTEXITCODE -ne 0) {
-    throw "Failed to push the commit to GitHub. Check Git credentials and permissions."
-}
-
-Write-Output "Successfully pushed new migration file to GitHub!"
-'''
+                            powershell './scripts/commit-custom-query.ps1'
                         }
                     }
                 }
