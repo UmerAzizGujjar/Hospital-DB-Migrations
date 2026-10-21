@@ -101,7 +101,7 @@ foreach ($f in$files) {
     elseif ($days -eq 1) {$timeStr = "Modified 1 day ago" }
     else { $timeStr = "Modified $days days ago" }
     
-    $outputList += "$relPath \vert{}$timeStr"
+    $outputList += "$relPath | $timeStr"
 }
 $outputList
 '''
