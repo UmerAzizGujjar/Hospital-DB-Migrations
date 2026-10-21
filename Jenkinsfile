@@ -66,7 +66,7 @@ pipeline {
                     def invalidDatabases = selectedDatabases.findAll { !(it in config.databases) }
 
                     if (invalidDatabases) {
-                        error "Database selection is invalid for ${target}: ${invalidDatabases}"
+                        error "Database selection is invalid for ${target}:${invalidDatabases}"
                     }
 
                     echo "Environment: ${target}"
@@ -91,17 +91,17 @@ $files = Get-ChildItem -Path .\\migrations -Recurse -File -Filter '*.sql' -Error
     Sort-Object -Property LastWriteTime -Descending
 
 $outputList = @()
-foreach ($f in $files) {
-    $relPath = $f.FullName.Substring((Get-Location).Path.Length + 1)
-    $fileDate = $f.LastWriteTime.Date
-    $days = ($now - $fileDate).Days
+foreach ($f in$files) {
+    $relPath =$f.FullName.Substring((Get-Location).Path.Length + 1)
+    $fileDate =$f.LastWriteTime.Date
+    $days = ($now -$fileDate).Days
     
-    if ($days -lt 0) { $timeStr = "Future date" }
-    elseif ($days -eq 0) { $timeStr = "Modified today" }
-    elseif ($days -eq 1) { $timeStr = "Modified 1 day ago" }
+    if ($days -lt 0) {$timeStr = "Future date" }
+    elseif ($days -eq 0) {$timeStr = "Modified today" }
+    elseif ($days -eq 1) {$timeStr = "Modified 1 day ago" }
     else { $timeStr = "Modified $days days ago" }
     
-    $outputList += "$relPath | $timeStr"
+    $outputList += "$relPath \vert{}$timeStr"
 }
 $outputList
 '''
@@ -192,12 +192,11 @@ Continue?
                                     "SQL_CUSTOM_TEXT=${params.CUSTOM_SQL_TEXT ?: ''}"
                                 ]) {
                                     powershell '''
-$ErrorActionPreference = 'Stop'
-$connectionString = "Server=$env:SQL_SERVER;Initial Catalog=$env:SQL_DATABASE;User ID=$env:SQL_USER;Password=$env:SQL_PASSWORD;Encrypt=True;TrustServerCertificate=True;Connect Timeout=15"
+$ErrorActionPreference = 'Stop'$connectionString = "Server=$env:SQL_SERVER;Initial Catalog=$env:SQL_DATABASE;User ID=$env:SQL_USER;Password=$env:SQL_PASSWORD;Encrypt=True;TrustServerCertificate=True;Connect Timeout=15"
 $connection = New-Object System.Data.SqlClient.SqlConnection($connectionString)
 
 $handler = [System.Data.SqlClient.SqlInfoMessageEventHandler] {
-    param($sender, $eventArgs)
+    param($sender,$eventArgs)
     Write-Output "[$env:SQL_DATABASE] SQL MESSAGE: $($eventArgs.Message)"
 }
 $connection.add_InfoMessage($handler)
@@ -209,25 +208,24 @@ try {
     Write-Output "--------------------------------------------------------"
 
     if ($env:USE_CUSTOM_QUERY -eq 'true') {
-        $sql = $env:SQL_CUSTOM_TEXT
+        # Intercept and clean the hidden Active Choices escape characters
+        $sql =$env:SQL_CUSTOM_TEXT -replace '\\\\n', "`n" -replace '\\\\r', "`r"
     } else {
-        $sql = Get-Content -LiteralPath $env:SQL_MIGRATION_FILE -Raw
+        $sql = Get-Content -LiteralPath$env:SQL_MIGRATION_FILE -Raw
     }
 
     $batches = [regex]::Split($sql, '(?im)^\\s*GO\\s*(?:--.*)?$')
-    $transaction = $connection.BeginTransaction()
+    $transaction =$connection.BeginTransaction()
 
     try {
-        foreach ($batch in $batches) {
+        foreach ($batch in$batches) {
             if ([string]::IsNullOrWhiteSpace($batch)) { continue }
 
-            $command = $connection.CreateCommand()
-            $command.Transaction = $transaction
-            $command.CommandTimeout = 120
-            $command.CommandText = $batch
+            $command = $connection.CreateCommand()$command.Transaction = $transaction$command.CommandTimeout = 120
+            $command.CommandText =$batch
 
             try {
-                $rowsAffected = $command.ExecuteNonQuery()
+                $rowsAffected =$command.ExecuteNonQuery()
                 if ($rowsAffected -ge 0) {
                     Write-Output "[$env:SQL_DATABASE] ($rowsAffected row(s) affected)"
                 } else {
@@ -256,8 +254,7 @@ try {
     finally { $transaction.Dispose() }
 }
 finally {
-    $connection.remove_InfoMessage($handler)
-    $connection.Dispose()
+    $connection.remove_InfoMessage($handler)$connection.Dispose()
 }
 '''
                                 }
@@ -283,7 +280,6 @@ finally {
             }
             steps {
                 script {
-                    // Using your existing GitHub PAT credential ID
                     withCredentials([
                         usernamePassword(credentialsId: 'f2d6a7df-0fbc-46ae-a972-2aeb85e24bba', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PASS')
                     ]) {
@@ -292,15 +288,13 @@ finally {
                             "SQL_CUSTOM_TEXT=${params.CUSTOM_SQL_TEXT ?: ''}"
                         ]) {
                             powershell '''
-$ErrorActionPreference = 'Stop'
-$timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+$ErrorActionPreference = 'Stop'$timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
 
-$baseName = $env:CUSTOM_FILE_NAME
-if ([string]::IsNullOrWhiteSpace($baseName)) {
-    $baseName = "UI_CustomQuery"
+$baseName =$env:CUSTOM_FILE_NAME
+if ([string]::IsNullOrWhiteSpace($baseName)) {$baseName = "UI_CustomQuery"
 } else {
     $baseName = $baseName -replace '\\.sql$', ''
-    $baseName = $baseName -replace '[^a-zA-Z0-9_]', '_'
+    $baseName =$baseName -replace '[^a-zA-Z0-9_]', '_'
 }
 
 $fileName = "V${timestamp}__${baseName}.sql"
@@ -308,7 +302,9 @@ $filePath = ".\\migrations\\$fileName"
 
 if (!(Test-Path '.\\migrations')) { New-Item -ItemType Directory -Path '.\\migrations' }
 
-$env:SQL_CUSTOM_TEXT | Out-File -FilePath $filePath -Encoding UTF8
+# Intercept and clean the hidden Active Choices escape characters before saving to GitHub
+$cleanSql =$env:SQL_CUSTOM_TEXT -replace '\\\\n', "`n" -replace '\\\\r', "`r"
+$cleanSql \vert{} Out-File -FilePath$filePath -Encoding UTF8
 Write-Output "Created migration file: $fileName"
 
 git config user.name "Jenkins Automation"
@@ -316,7 +312,7 @@ git config user.email "jenkins@automation.local"
 
 $remoteUrl = git remote get-url origin
 if ($remoteUrl -match 'https://github.com/(.*)') {
-    $repoPath = $Matches[1]
+    $repoPath =$Matches[1]
     
     $encUser = [uri]::EscapeDataString($env:GIT_USER)
     $encPass = [uri]::EscapeDataString($env:GIT_PASS)
