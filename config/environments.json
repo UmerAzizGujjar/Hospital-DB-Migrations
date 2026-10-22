@@ -8,16 +8,18 @@
     },
     "UAT": {
         "databases": {
-            "pakred_uat":        { "server": "WIN-APTS20MHM62",  "credentialId": "sql-uat-dbs-credentials",   "node": "PAKRED_LIVE_SERVER" },
-            "IITH_test":         { "server": "IITH-ITDESK",      "credentialId": "IITH_dbs",                  "node": "IITH_LIVE" },
-            "NoorHospital_uat":  { "server": "WIN-P7KDGITJ3NF",  "credentialId":"Noor_dbs",                   "node": "NOOR_LIVE_SERVER"}
+            "pakred_uat":                   { "server": "WIN-APTS20MHM62",  "credentialId": "sql-uat-dbs-credentials",   "node": "PAKRED_LIVE_SERVER" },
+            "IITH_test":                    { "server": "IITH-ITDESK",      "credentialId": "IITH_dbs",                  "node": "IITH_LIVE" },
+            "NoorHospital_uat":             { "server": "WIN-P7KDGITJ3NF",  "credentialId":"Noor_dbs",                   "node": "NOOR_LIVE_SERVER"},
+            "H_U_NationalHospital_Latest":  { "server": "HMIS",             "credentialId":"National_dbs",               "node": "NHMC_VM"}
         }
     },
     "LIVE": {
         "databases": {
-            "IITH":               { "server": "IITH-ITDESK",      "credentialId": "IITH_dbs",     "node": "IITH_LIVE" },
-            "NoorHospital":       { "server": "WIN-P7KDGITJ3NF",  "credentialId":"Noor_dbs",      "node": "NOOR_LIVE_SERVER"},
-            "ASsiraat_Standard":  { "server": "ASSIRAAT",         "credentialId":"ASSsirate_dbs",  "node": "ASSIRAAT_LIVE_SERVER"},
+            "IITH":                   { "server": "IITH-ITDESK",      "credentialId": "IITH_dbs",     "node": "IITH_LIVE" },
+            "NoorHospital":           { "server": "WIN-P7KDGITJ3NF",  "credentialId":"Noor_dbs",      "node": "NOOR_LIVE_SERVER"},
+            "ASsiraat_Standard":      { "server": "ASSIRAAT",         "credentialId":"ASSsirate_dbs",  "node": "ASSIRAAT_LIVE_SERVER"},
+            "H_P_National_Hospital":  { "server": "HMIS",             "credentialId":"National_dbs",   "node": "NHMC_VM"},
         }
     }
 }
