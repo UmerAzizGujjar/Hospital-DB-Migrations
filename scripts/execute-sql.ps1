@@ -20,6 +20,8 @@ try {
         $sql = $env:SQL_CUSTOM_TEXT -replace '\\n', "`n" -replace '\\r', "`r"
         # Also drop a stray backslash sitting right before a real line break
         $sql = $sql -replace '\\(?=\r?\n)', ''
+        # Jenkins/Active Choices can append a stray trailing comma (joined parameter values); no valid SQL ends with one
+        $sql = $sql -replace ',\s*$', ''
     } else {
         $sql = Get-Content -LiteralPath $env:SQL_MIGRATION_FILE -Raw
     }
