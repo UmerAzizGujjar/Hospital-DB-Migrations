@@ -20,6 +20,7 @@
             "NoorHospital":           { "server": "WIN-P7KDGITJ3NF",  "credentialId":"Noor_dbs",      "node": "NOOR_LIVE_SERVER"},
             "ASsiraat_Standard":      { "server": "ASSIRAAT",         "credentialId":"ASSsirate_dbs",  "node": "ASSIRAAT_LIVE_SERVER"},
             "H_P_National_Hospital":  { "server": "HMIS",             "credentialId":"National_dbs",   "node": "NHMC_VM"},
+            "kaleemHospital_live":    { "server": "kaleem_dbs",       "credentialId":"kaleem_dbs",       "node": "KALEEM_LIVE_SERVER"},
         }
     }
 }
