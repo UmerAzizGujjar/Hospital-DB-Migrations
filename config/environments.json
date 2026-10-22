@@ -1,0 +1,20 @@
+{
+    "TEST": {
+        "databases": {
+            "H_U_ASSIRAAT": { "server": "WIN-U6S7JB4ANMN", "credentialId": "sql-test-dbs-credentials", "node": "built-in" },
+            "H_U_Kaleem":   { "server": "WIN-U6S7JB4ANMN", "credentialId": "sql-test-dbs-credentials", "node": "built-in" },
+            "H_U_NHMC":     { "server": "WIN-U6S7JB4ANMN", "credentialId": "sql-test-dbs-credentials", "node": "built-in" }
+        }
+    },
+    "UAT": {
+        "databases": {
+            "pakred_uat": { "server": "WIN-APTS20MHM62", "credentialId": "sql-uat-dbs-credentials", "node": "PAKRED_LIVE_SERVER" },
+            "IITH_test":  { "server": "IITH-ITDESK",     "credentialId": "IITH_dbs",                  "node": "IITH_LIVE" }
+        }
+    },
+    "LIVE": {
+        "databases": {
+            "IITH": { "server": "IITH-ITDESK", "credentialId": "IITH_dbs", "node": "IITH_LIVE" }
+        }
+    }
+}
