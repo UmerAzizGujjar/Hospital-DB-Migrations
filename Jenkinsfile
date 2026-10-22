@@ -1,21 +1,4 @@
-def environmentConfig = [
-    TEST: [
-        server: 'WIN-U6S7JB4ANMN',
-        credentialId: 'sql-test-dbs-credentials',
-        databases: ['H_U_ASSIRAAT', 'H_U_Kaleem', 'H_U_NHMC']
-    ],
-    UAT: [
-        server: 'WIN-APTS20MHM62',
-        credentialId: 'sql-uat-dbs-credentials',
-        databases: ['pakred_uat']
-    ],
-    LIVE: [
-        server: '',
-        credentialId: 'sql-live-dbs-credentials',
-        databases: []
-    ]
-]
-
+def environmentConfig = [:]
 def selectedDatabases = []
 def selectedMigration = ''
 
@@ -30,7 +13,18 @@ pipeline {
 
     stages {
         stage('Checkout Repository') {
-            steps { checkout scm }
+            steps { 
+                checkout scm 
+            }
+        }
+
+        stage('Load Configuration') {
+            steps {
+                script {
+                    // Dynamically read the environments and databases from the external JSON file
+                    environmentConfig = readJSON file: 'config/environments.json'
+                }
+            }
         }
 
         stage('Validate Request') {
@@ -49,10 +43,6 @@ pipeline {
 
                     def config = environmentConfig[target]
 
-                    if (!config.server?.trim()) {
-                        error "LIVE is disabled until its SQL Server is configured."
-                    }
-
                     selectedDatabases = (params.DATABASES ?: '')
                         .toString()
                         .split(/[,;\r\n]+/)
@@ -63,10 +53,10 @@ pipeline {
                         error 'Select at least one valid database.'
                     }
 
-                    def invalidDatabases = selectedDatabases.findAll { !(it in config.databases) }
+                    def invalidDatabases = selectedDatabases.findAll { !(it in config.databases.keySet()) }
 
                     if (invalidDatabases) {
-                        error "Database selection is invalid for ${target}:${invalidDatabases}"
+                        error "Database selection is invalid for ${target}: ${invalidDatabases}"
                     }
 
                     echo "Environment: ${target}"
@@ -156,22 +146,30 @@ Continue?
                 script {
                     def target = params.TARGET_ENV.toString()
                     def useCustom = params.USE_CUSTOM_QUERY?.toString() == 'Yes'
-                    def config = environmentConfig[target]
+                    def dbMap = environmentConfig[target].databases
                     def hasErrors = false
 
                     for (String db in selectedDatabases) {
+                        def dbProps = dbMap[db]
+                        
                         try {
-                            withCredentials([
-                                usernamePassword(credentialsId: config.credentialId, usernameVariable: 'SQL_USER', passwordVariable: 'SQL_PASSWORD')
-                            ]) {
-                                withEnv([
-                                    "SQL_SERVER=${config.server}",
-                                    "SQL_DATABASE=${db}",
-                                    "SQL_MIGRATION_FILE=${selectedMigration}",
-                                    "USE_CUSTOM_QUERY=${useCustom}",
-                                    "SQL_CUSTOM_TEXT=${params.CUSTOM_SQL_TEXT ?: ''}"
+                            // Dynamically switch to the specific server node for this database
+                            node(dbProps.node) {
+                                // Checking out SCM ensures the node pulls the external script files to its local workspace
+                                checkout scm
+                                
+                                withCredentials([
+                                    usernamePassword(credentialsId: dbProps.credentialId, usernameVariable: 'SQL_USER', passwordVariable: 'SQL_PASSWORD')
                                 ]) {
-                                    powershell './scripts/execute-sql.ps1'
+                                    withEnv([
+                                        "SQL_SERVER=${dbProps.server}",
+                                        "SQL_DATABASE=${db}",
+                                        "SQL_MIGRATION_FILE=${selectedMigration}",
+                                        "USE_CUSTOM_QUERY=${useCustom}",
+                                        "SQL_CUSTOM_TEXT=${params.CUSTOM_SQL_TEXT ?: ''}"
+                                    ]) {
+                                        powershell './scripts/execute-sql.ps1'
+                                    }
                                 }
                             }
                         } catch (Exception e) {
