@@ -15,6 +15,7 @@ $filePath = ".\migrations\$fileName"
 if (!(Test-Path '.\migrations')) { New-Item -ItemType Directory -Path '.\migrations' | Out-Null }
 
 $cleanSql = $env:SQL_CUSTOM_TEXT -replace '\\n', "`n" -replace '\\r', "`r"
+$cleanSql = $cleanSql -replace ',\s*$', ''
 Out-File -InputObject $cleanSql -FilePath $filePath -Encoding UTF8
 
 Write-Output "Created migration file: $fileName"
