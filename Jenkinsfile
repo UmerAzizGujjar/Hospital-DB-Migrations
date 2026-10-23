@@ -175,6 +175,7 @@ Continue?
                         } catch (Exception e) {
                             echo "--------------------------------------------------------"
                             echo "ERROR ON ${db}. CONTINUING TO NEXT DATABASE..."
+                            echo "Pipeline Error Details: ${e.getMessage()}"
                             echo "--------------------------------------------------------"
                             hasErrors = true
                         }
