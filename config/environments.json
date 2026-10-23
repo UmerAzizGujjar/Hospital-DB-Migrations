@@ -22,7 +22,7 @@
             "ASsiraat_Standard":      { "server": "ASSIRAAT",            "credentialId":"ASSsirate_dbs",  "node": "ASSIRAAT_LIVE_SERVER"},
             "H_P_National_Hospital":  { "server": "HMIS",                "credentialId":"National_dbs",   "node": "NHMC_VM"},
             "kaleemHospital_live":    { "server": "DESKTOP-3H7LG2C",     "credentialId":"kaleem_dbs",     "node": "KALEEM_LIVE_SERVER"},
-            "H_P_CPTH":              { "server": "ERP-D",               "credentialId":"Cpth_dbs",       "node": "CPTH"}
+            "H_P_CPTH":               { "server": "tcp:10.0.0.112,7890", "credentialId":"Cpth_dbs",       "node": "CPTH"}
         }
     }
 }
