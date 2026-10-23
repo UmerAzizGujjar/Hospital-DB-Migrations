@@ -54,11 +54,25 @@ try {
             $command.CommandText = $batch
 
             try {
-                $rowsAffected = $command.ExecuteNonQuery()
-                if ($rowsAffected -ge 0) {
-                    Write-Output "[$env:SQL_DATABASE] ($rowsAffected row(s) affected)"
+                # Determine if it's a SELECT query to display results
+                if ($batch.Trim() -match '^(?i)SELECT') {
+                    $adapter = New-Object System.Data.SqlClient.SqlDataAdapter($command)
+                    $dataset = New-Object System.Data.DataSet
+                    [void]$adapter.Fill($dataset)
+                    
+                    if ($dataset.Tables.Count -gt 0 -and $dataset.Tables[0].Rows.Count -gt 0) {
+                        Write-Output "[$env:SQL_DATABASE] Query Results:"
+                        $dataset.Tables[0] | Format-Table -AutoSize | Out-String | Write-Output
+                    } else {
+                        Write-Output "[$env:SQL_DATABASE] (0 row(s) returned)"
+                    }
                 } else {
-                    Write-Output "[$env:SQL_DATABASE] Command completed successfully."
+                    $rowsAffected = $command.ExecuteNonQuery()
+                    if ($rowsAffected -ge 0) {
+                        Write-Output "[$env:SQL_DATABASE] ($rowsAffected row(s) affected)"
+                    } else {
+                        Write-Output "[$env:SQL_DATABASE] Command completed successfully."
+                    }
                 }
             }
             finally { $command.Dispose() }
