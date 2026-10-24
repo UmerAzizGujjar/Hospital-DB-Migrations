@@ -17,7 +17,7 @@
     },
     "UAT (Own Server)": {
         "databases": {
-            "CPTH_Test":  {"server": "tcp:192.168.100.32",  "credentialId": "Ownserver_Dbs", "node": "built-in"},
+            "CPTH_Test":  {"server": "tcp:10.0.0.112,7890",  "credentialId": "Ownserver_Dbs", "node": "built-in"},
         }
     },
     "LIVE": {
