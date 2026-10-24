@@ -17,7 +17,12 @@
     },
     "UAT (Own Server)": {
         "databases": {
-            "CPTH_Test":  {"server": "WIN-D6QS665C7BE",  "credentialId": "Ownserver_Dbs", "node": "Own database server"},
+            "CPTH_Test":    {"server": "WIN-D6QS665C7BE",  "credentialId": "Ownserver_Dbs", "node": "Own database server"},
+            "H_P_Kaleem":   {"server": "WIN-D6QS665C7BE",  "credentialId": "Ownserver_Dbs", "node": "Own database server"},
+            "H_U_NH":    {"server": "WIN-D6QS665C7BE",  "credentialId": "Ownserver_Dbs", "node": "Own database server"},
+            "H_P_NH_FSBD":  {"server": "WIN-D6QS665C7BE",  "credentialId": "Ownserver_Dbs", "node": "Own database server"},
+            "H_P_Prime":    {"server": "WIN-D6QS665C7BE",  "credentialId": "Ownserver_Dbs", "node": "Own database server"},
+            "H_U_Assiraat": {"server": "WIN-D6QS665C7BE",  "credentialId": "Ownserver_Dbs", "node": "Own database server"},
         }
     },
     "LIVE": {
